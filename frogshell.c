@@ -43,7 +43,7 @@ static const char *key_names[BTN_COUNT] = {
 typedef struct { int fd, w, h, pitch, bytespp; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
 typedef struct { char name[256]; int dir; off_t size; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
-typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_KEYBOARD, MODE_INFO } Mode;
+typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_REWRITE, MODE_KEYBOARD, MODE_INFO } Mode;
 typedef enum { OP_NONE, OP_COPY, OP_CUT } Op;
 
 static volatile sig_atomic_t quit_requested;
@@ -275,8 +275,17 @@ static int remove_tree(const char *p) { struct stat st; if (lstat(p, &st) != 0) 
 
 static void unique_copy_name(const char *dst, char *out, size_t n) {
     if (access(dst, F_OK) != 0) { strncpy(out, dst, n - 1); out[n - 1] = 0; return; }
+    const char *slash = strrchr(dst, '/');
+    const char *name = slash ? slash + 1 : dst;
+    size_t prefix = slash ? (size_t)(slash - dst + 1) : 0;
+    const char *dot = strrchr(name, '.');
+    size_t stem_len = (dot && dot != name) ? (size_t)(dot - name) : strlen(name);
+    char stem[256], ext[256];
+    if (stem_len >= sizeof stem) stem_len = sizeof stem - 1;
+    memcpy(stem, name, stem_len); stem[stem_len] = 0;
+    snprintf(ext, sizeof ext, "%s", (dot && dot != name) ? dot : "");
     for (int i = 1; i < 1000; i++) {
-        snprintf(out, n, "%s (copy %d)", dst, i);
+        snprintf(out, n, "%.*s%s (%d)%s", (int)prefix, dst, stem, i, ext);
         if (access(out, F_OK) != 0) return;
     }
     strncpy(out, dst, n - 1); out[n - 1] = 0;
@@ -331,9 +340,16 @@ static void draw(void) {
         rect(x, y, w, h, 0x303030); rect(x, y, w, 36 * scale, theme.accent);
         text(x + 14 * scale, y + 8 * scale, "ITEM ALREADY EXISTS", scale, theme.selected, w - 28 * scale);
         text(x + 14 * scale, y + 50 * scale, base(clipboard_paths[conflict_index]), scale, theme.text, w - 28 * scale);
-        const char *choices[] = { "Skip", "Overwrite", "Keep both" };
+        const char *choices[] = { "Skip", "Rewrite", "Number" };
         for (int i = 0; i < 3; i++) { int bx = x + 14 * scale + i * ((w - 28 * scale) / 3); if (i == conflict_choice) rect(bx, y + 86 * scale, (w - 42 * scale) / 3, 30 * scale, theme.accent); text(bx + 8 * scale, y + 94 * scale, choices[i], scale, i == conflict_choice ? theme.selected : theme.text, (w - 42 * scale) / 3 - 12 * scale); }
         text(x + 14 * scale, y + 132 * scale, "LEFT/RIGHT CHOOSE   A APPLY   B CANCEL", scale, theme.text, w - 28 * scale);
+    }
+    if (mode == MODE_REWRITE) {
+        int w = screen.w - 56 * scale, h = 128 * scale, x = (screen.w - w) / 2, y = (screen.h - h) / 2;
+        rect(x, y, w, h, 0x303030); rect(x, y, w, 34 * scale, 0xA83232);
+        text(x + 14 * scale, y + 8 * scale, "REWRITE EXISTING ITEM?", scale, theme.selected, w - 28 * scale);
+        text(x + 14 * scale, y + 50 * scale, base(clipboard_paths[conflict_index]), scale, theme.text, w - 28 * scale);
+        text(x + 14 * scale, y + 88 * scale, "A YES   B NO", scale, theme.selected, w - 28 * scale);
     }
     if (mode == MODE_INFO) { int w = screen.w - 40 * scale; rect(20 * scale, screen.h / 2 - 70 * scale, w, 140 * scale, 0x303030); char p[MAX_PATH], info[160]; if (selected < entry_count) { join_path(p, sizeof p, current, entries[selected].name); struct stat st; stat(p, &st); snprintf(info, sizeof info, "%s  %s  %lld bytes", entries[selected].name, entries[selected].dir ? "folder" : "file", (long long)st.st_size); text(32 * scale, screen.h / 2 - 35 * scale, info, scale, theme.text, w - 24 * scale); } text(32 * scale, screen.h / 2 + 10 * scale, "B CLOSE", scale, theme.selected, w - 24 * scale); }
     if (mode == MODE_KEYBOARD) { int w = screen.w - 30 * scale, x = 15 * scale, y = screen.h / 2 - 100 * scale; rect(x, y, w, 190 * scale, 0x303030); text(x + 12 * scale, y + 12 * scale, prompt, scale, theme.selected, w - 24 * scale); for (int r = 0; r < 4; r++) text(x + 18 * scale, y + 48 * scale + r * 24 * scale, kbd_rows[r], scale, r == keyboard_row ? theme.selected : theme.text, w - 36 * scale); text(x + 18 * scale, y + 150 * scale, "SPACE  DEL  DONE", scale, theme.text, w - 36 * scale); text(x + 18 * scale, y + 174 * scale, "A TYPE  START SAVE  B CANCEL", scale, theme.selected, w - 36 * scale); }
@@ -384,7 +400,7 @@ static void input_loop(void) {
     uint32_t k = keys_now();
     uint32_t quit_chord = (1u << BTN_START) | (1u << BTN_SELECT);
     if ((k & quit_chord) == quit_chord && (previous_keys & quit_chord) != quit_chord) { quit_requested = 1; previous_keys = k; return; }
-    if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) { do_delete(); mode = MODE_NORMAL; } else do_paste(); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_CONFLICT) { if (pressed(k, BTN_LEFT)) conflict_choice = (conflict_choice + 2) % 3; if (pressed(k, BTN_RIGHT)) conflict_choice = (conflict_choice + 1) % 3; if (pressed(k, BTN_A)) paste_items(conflict_index, conflict_choice); if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
+    if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) { do_delete(); mode = MODE_NORMAL; } else do_paste(); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_CONFLICT) { if (pressed(k, BTN_LEFT)) conflict_choice = (conflict_choice + 2) % 3; if (pressed(k, BTN_RIGHT)) conflict_choice = (conflict_choice + 1) % 3; if (pressed(k, BTN_A)) { if (conflict_choice == 1) mode = MODE_REWRITE; else paste_items(conflict_index, conflict_choice == 2 ? 2 : 0); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_REWRITE) { if (pressed(k, BTN_A)) paste_items(conflict_index, 1); if (pressed(k, BTN_B)) mode = MODE_CONFLICT; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
 }
 
 int main(void) {

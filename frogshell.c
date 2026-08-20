@@ -41,7 +41,7 @@ static const char *key_names[BTN_COUNT] = {
 };
 
 typedef struct { int fd, w, h, pitch, bytespp; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
-typedef struct { char name[256]; int dir; off_t size; } Entry;
+typedef struct { char name[256]; int dir; off_t size; time_t modified; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
 typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_REWRITE, MODE_KEYBOARD, MODE_INFO } Mode;
 typedef enum { OP_NONE, OP_COPY, OP_CUT } Op;
@@ -254,7 +254,7 @@ static void scan(void) {
         if (e->d_name[0] == '.') continue;
         struct stat st; char p[MAX_PATH]; join_path(p, sizeof p, current, e->d_name); if (stat(p, &st) != 0) continue;
         strncpy(entries[entry_count].name, e->d_name, sizeof entries[entry_count].name - 1); entries[entry_count].name[sizeof entries[entry_count].name - 1] = 0;
-        entries[entry_count].dir = S_ISDIR(st.st_mode); entries[entry_count].size = st.st_size; entry_count++;
+        entries[entry_count].dir = S_ISDIR(st.st_mode); entries[entry_count].size = st.st_size; entries[entry_count].modified = st.st_mtime; entry_count++;
     }
     closedir(d); if (entry_count > 1) qsort(entries + (strcmp(current, ROOT) != 0), entry_count - (strcmp(current, ROOT) != 0), sizeof *entries, entry_cmp);
     if (selected >= entry_count) selected = entry_count ? entry_count - 1 : 0; if (selected < 0) selected = 0; scroll = selected >= 10 ? selected - 9 : 0;
@@ -328,7 +328,19 @@ static void draw(void) {
     int scale = screen.w >= 800 ? 2 : 1, row_h = 42 * scale, header = 48 * scale; clear(0x101010);
     rect(0, 0, screen.w, header, theme.accent); char title[120]; snprintf(title, sizeof title, "FROGSHELL  %s", current); text(12, 9 * scale, title, scale, theme.selected, screen.w - 24);
     int visible = (screen.h - header - 42 * scale) / row_h; if (visible < 1) visible = 1; if (selected < scroll) scroll = selected; if (selected >= scroll + visible) scroll = selected - visible + 1;
-    for (int i = 0; i < visible && scroll + i < entry_count; i++) { int idx = scroll + i, y = header + i * row_h; bool active = idx == selected; char p[MAX_PATH]; join_path(p, sizeof p, current, entries[idx].name); uint32_t bg = active ? theme.accent : 0x202020; rect(0, y, screen.w, row_h - 2, bg); if (marked_path(p)) rect(0, y, 5 * scale, row_h - 2, 0xF0C040); char label[300]; snprintf(label, sizeof label, "%s%s", entries[idx].name, entries[idx].dir ? "/" : ""); text(14 * scale, y + 8 * scale, label, scale, active ? theme.selected : theme.text, screen.w - 120 * scale); if (!entries[idx].dir) { char sz[32]; snprintf(sz, sizeof sz, "%lld", (long long)entries[idx].size); text(screen.w - (int)strlen(sz) * 8 * scale - 14 * scale, y + 8 * scale, sz, scale, active ? theme.selected : 0xAAAAAA, 100 * scale); } }
+    for (int i = 0; i < visible && scroll + i < entry_count; i++) {
+        int idx = scroll + i, y = header + i * row_h; bool active = idx == selected; char p[MAX_PATH];
+        join_path(p, sizeof p, current, entries[idx].name); uint32_t bg = active ? theme.accent : (i & 1 ? 0x202020 : 0x1B1B1B);
+        rect(0, y, screen.w, row_h - 2, bg); if (marked_path(p)) rect(0, y, 5 * scale, row_h - 2, 0xF0C040);
+        if (entries[idx].dir) { /* VitaShell-style folder marker; files intentionally have no icon. */ rect(12 * scale, y + 11 * scale, 22 * scale, 16 * scale, active ? theme.selected : theme.accent); rect(15 * scale, y + 8 * scale, 10 * scale, 5 * scale, active ? theme.selected : theme.accent); }
+        char label[300], kind[80], stamp[32]; snprintf(label, sizeof label, "%s%s", entries[idx].name, entries[idx].dir ? "/" : "");
+        if (entries[idx].dir) snprintf(kind, sizeof kind, "Folder"); else { const char *dot = strrchr(entries[idx].name, '.'); snprintf(kind, sizeof kind, "%s", dot && dot[1] ? dot + 1 : "File"); }
+        struct tm *tmv = localtime(&entries[idx].modified); if (!tmv || !strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M", tmv)) strcpy(stamp, "Unknown time");
+        text(42 * scale, y + 4 * scale, label, scale, active ? theme.selected : theme.text, screen.w - 235 * scale);
+        text(42 * scale, y + 24 * scale, kind, scale, active ? theme.selected : 0xA8A8A8, 100 * scale);
+        text(screen.w - 190 * scale, y + 24 * scale, stamp, scale, active ? theme.selected : 0xA8A8A8, 178 * scale);
+        if (!entries[idx].dir) { char sz[32]; snprintf(sz, sizeof sz, "%lld", (long long)entries[idx].size); text(screen.w - (int)strlen(sz) * 8 * scale - 12 * scale, y + 4 * scale, sz, scale, active ? theme.selected : 0xAAAAAA, 90 * scale); }
+    }
     char footer[220]; snprintf(footer, sizeof footer, "A Open   B Back   X Menu   Y Mark   SELECT Paste   START New");
     rect(0, screen.h - 34 * scale, screen.w, 34 * scale, 0x181818);
     text(12 * scale, screen.h - 27 * scale, footer, scale, theme.text, screen.w - 24 * scale);

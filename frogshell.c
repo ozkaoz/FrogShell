@@ -43,7 +43,7 @@ static const char *key_names[BTN_COUNT] = {
 typedef struct { int fd, w, h, pitch, bytespp; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
 typedef struct { char name[256]; int dir; off_t size; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
-typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_KEYBOARD, MODE_INFO } Mode;
+typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_KEYBOARD, MODE_INFO } Mode;
 typedef enum { OP_NONE, OP_COPY, OP_CUT } Op;
 
 static volatile sig_atomic_t quit_requested;
@@ -73,6 +73,7 @@ static int clipboard_count;
 static Op clipboard_op;
 static Mode mode;
 static int menu_item, confirm_kind;
+static int conflict_index, conflict_choice;
 static char prompt[MAX_PATH], prompt_original[MAX_PATH];
 static int keyboard_row, keyboard_col;
 static char status_text[160];
@@ -145,6 +146,7 @@ static volatile uint32_t *open_keys(void) {
 static uint32_t keys_now(void) { uint32_t out = 0, raw = raw_keys ? (*raw_keys & 0xFFFFu) : 0; for (int i = 0; i < BTN_COUNT; i++) if (raw & (1u << key_bits[i])) out |= 1u << i; return out; }
 static bool pressed(uint32_t keys, int b) { return (keys & (1u << b)) && !(previous_keys & (1u << b)); }
 static void set_status(const char *s) { strncpy(status_text, s, sizeof status_text - 1); status_text[sizeof status_text - 1] = 0; status_frames = 150; }
+static bool path_contains(const char *parent, const char *child) { size_t n = strlen(parent); return !strcmp(parent, child) || (!strncmp(parent, child, n) && child[n] == '/'); }
 
 static void configure_layer(void) {
     int fd = open("/dev/dis", O_RDWR);
@@ -271,6 +273,36 @@ static int copy_tree(const char *src, const char *dst) {
 
 static int remove_tree(const char *p) { struct stat st; if (lstat(p, &st) != 0) return -1; if (S_ISDIR(st.st_mode)) { DIR *d = opendir(p); if (!d) return -1; struct dirent *e; int rc = 0; while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue; char c[MAX_PATH]; join_path(c, sizeof c, p, e->d_name); if (remove_tree(c) != 0) rc = -1; } closedir(d); if (rmdir(p) != 0) rc = -1; return rc; } return unlink(p); }
 
+static void unique_copy_name(const char *dst, char *out, size_t n) {
+    if (access(dst, F_OK) != 0) { strncpy(out, dst, n - 1); out[n - 1] = 0; return; }
+    for (int i = 1; i < 1000; i++) {
+        snprintf(out, n, "%s (copy %d)", dst, i);
+        if (access(out, F_OK) != 0) return;
+    }
+    strncpy(out, dst, n - 1); out[n - 1] = 0;
+}
+
+/* policy: -1 ask, 0 skip, 1 overwrite, 2 keep both (auto-rename). */
+static void paste_items(int start, int policy) {
+    int rc = 0;
+    for (int i = start; i < clipboard_count; i++) {
+        char src[MAX_PATH], dst[MAX_PATH], final_dst[MAX_PATH];
+        strcpy(src, clipboard_paths[i]);
+        join_path(dst, sizeof dst, current, base(src));
+        if (!under_root(dst) || !strcmp(src, dst)) { set_status("Already in this folder"); continue; }
+        if (path_contains(src, dst)) { set_status("Cannot paste into itself"); rc = -1; continue; }
+        if (access(dst, F_OK) == 0) {
+            if (policy < 0) { conflict_index = i; mode = MODE_CONFLICT; return; }
+            if (policy == 0) continue;
+            if (policy == 2) unique_copy_name(dst, final_dst, sizeof final_dst);
+            else { strcpy(final_dst, dst); if (remove_tree(final_dst) != 0) { rc = -1; continue; } }
+        } else strcpy(final_dst, dst);
+        if ((clipboard_op == OP_CUT ? rename(src, final_dst) : copy_tree(src, final_dst)) != 0) rc = -1;
+    }
+    if (rc == 0 && clipboard_op == OP_CUT) { clipboard[0] = 0; clipboard_count = 0; }
+    set_status(rc == 0 ? "Paste complete" : "Some items failed"); scan(); mode = MODE_NORMAL;
+}
+
 static void clear_marks(void) { marked_count = 0; }
 static const char *action_names[] = { "Copy", "Cut", "Paste", "Rename", "Delete", "New folder", "Info", "Cancel" };
 static const int action_count = 8;
@@ -278,8 +310,7 @@ static void begin_keyboard(const char *initial, const char *old) { strncpy(promp
 static const char *kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM_-" };
 
 static void do_copy_or_cut(Op op) { char paths[MAX_MARKED][MAX_PATH]; int n = selected_paths(paths, MAX_MARKED); if (!n) { set_status("Nothing selected"); return; } clipboard_count = n; for (int i = 0; i < n; i++) strcpy(clipboard_paths[i], paths[i]); strcpy(clipboard, paths[0]); clipboard_op = op; set_status(op == OP_COPY ? "Copied to clipboard" : "Cut to clipboard"); }
-static bool path_contains(const char *parent, const char *child) { size_t n = strlen(parent); return !strcmp(parent, child) || (!strncmp(parent, child, n) && child[n] == '/'); }
-static void do_paste(void) { if (!clipboard_count || !clipboard[0]) { set_status("Clipboard is empty"); return; } int rc = 0; for (int i = 0; i < clipboard_count; i++) { char dst[MAX_PATH]; join_path(dst, sizeof dst, current, base(clipboard_paths[i])); if (!under_root(dst) || path_contains(clipboard_paths[i], dst) || (clipboard_op == OP_CUT ? rename(clipboard_paths[i], dst) : copy_tree(clipboard_paths[i], dst)) != 0) rc = -1; } if (rc == 0 && clipboard_op == OP_CUT) { clipboard[0] = 0; clipboard_count = 0; } set_status(rc == 0 ? "Pasted" : "Paste failed"); scan(); }
+static void do_paste(void) { if (!clipboard_count || !clipboard[0]) { set_status("Clipboard is empty"); return; } paste_items(0, -1); }
 static void do_delete(void) { char paths[MAX_MARKED][MAX_PATH]; int n = selected_paths(paths, MAX_MARKED), rc = 0; for (int i = 0; i < n; i++) if (!under_root(paths[i]) || remove_tree(paths[i]) != 0) rc = -1; clear_marks(); set_status(rc ? "Delete failed" : "Deleted"); scan(); }
 static void do_rename(const char *name) { char old[MAX_PATH], dst[MAX_PATH]; join_path(old, sizeof old, current, prompt_original); join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || rename(old, dst) != 0) set_status("Rename failed"); else set_status("Renamed"); scan(); }
 static void do_new_folder(const char *name) { char dst[MAX_PATH]; join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || mkdir(dst, 0777) != 0) set_status("Create folder failed"); else set_status("Folder created"); scan(); }
@@ -295,6 +326,15 @@ static void draw(void) {
     if (status_frames > 0) { int w = (int)strlen(status_text) * 8 * scale + 24 * scale; rect((screen.w - w) / 2, screen.h - 68 * scale, w, 28 * scale, theme.accent); text((screen.w - w) / 2 + 12 * scale, screen.h - 61 * scale, status_text, scale, theme.selected, w - 24 * scale); }
     if (mode == MODE_ACTIONS) { int w = 250 * scale, h = action_count * row_h + 20 * scale, x = (screen.w - w) / 2, y = (screen.h - h) / 2; rect(x, y, w, h, 0x303030); for (int i = 0; i < action_count; i++) { bool a = i == menu_item; if (a) rect(x + 4 * scale, y + 8 * scale + i * row_h, w - 8 * scale, row_h - 2, theme.accent); text(x + 18 * scale, y + 15 * scale + i * row_h, action_names[i], scale, a ? theme.selected : theme.text, w - 30 * scale); } }
     if (mode == MODE_CONFIRM) { int w = 430 * scale, x = (screen.w - w) / 2; rect(x, screen.h / 2 - 48 * scale, w, 96 * scale, 0x303030); text(x + 18 * scale, screen.h / 2 - 28 * scale, confirm_kind == 1 ? "Delete selected item(s)?" : "Paste into this folder?", scale, theme.text, w - 36 * scale); text(x + 18 * scale, screen.h / 2 + 10 * scale, "A YES   B CANCEL", scale, theme.selected, w - 36 * scale); }
+    if (mode == MODE_CONFLICT) {
+        int w = screen.w - 44 * scale, h = 168 * scale, x = (screen.w - w) / 2, y = (screen.h - h) / 2;
+        rect(x, y, w, h, 0x303030); rect(x, y, w, 36 * scale, theme.accent);
+        text(x + 14 * scale, y + 8 * scale, "ITEM ALREADY EXISTS", scale, theme.selected, w - 28 * scale);
+        text(x + 14 * scale, y + 50 * scale, base(clipboard_paths[conflict_index]), scale, theme.text, w - 28 * scale);
+        const char *choices[] = { "Skip", "Overwrite", "Keep both" };
+        for (int i = 0; i < 3; i++) { int bx = x + 14 * scale + i * ((w - 28 * scale) / 3); if (i == conflict_choice) rect(bx, y + 86 * scale, (w - 42 * scale) / 3, 30 * scale, theme.accent); text(bx + 8 * scale, y + 94 * scale, choices[i], scale, i == conflict_choice ? theme.selected : theme.text, (w - 42 * scale) / 3 - 12 * scale); }
+        text(x + 14 * scale, y + 132 * scale, "LEFT/RIGHT CHOOSE   A APPLY   B CANCEL", scale, theme.text, w - 28 * scale);
+    }
     if (mode == MODE_INFO) { int w = screen.w - 40 * scale; rect(20 * scale, screen.h / 2 - 70 * scale, w, 140 * scale, 0x303030); char p[MAX_PATH], info[160]; if (selected < entry_count) { join_path(p, sizeof p, current, entries[selected].name); struct stat st; stat(p, &st); snprintf(info, sizeof info, "%s  %s  %lld bytes", entries[selected].name, entries[selected].dir ? "folder" : "file", (long long)st.st_size); text(32 * scale, screen.h / 2 - 35 * scale, info, scale, theme.text, w - 24 * scale); } text(32 * scale, screen.h / 2 + 10 * scale, "B CLOSE", scale, theme.selected, w - 24 * scale); }
     if (mode == MODE_KEYBOARD) { int w = screen.w - 30 * scale, x = 15 * scale, y = screen.h / 2 - 100 * scale; rect(x, y, w, 190 * scale, 0x303030); text(x + 12 * scale, y + 12 * scale, prompt, scale, theme.selected, w - 24 * scale); for (int r = 0; r < 4; r++) text(x + 18 * scale, y + 48 * scale + r * 24 * scale, kbd_rows[r], scale, r == keyboard_row ? theme.selected : theme.text, w - 36 * scale); text(x + 18 * scale, y + 150 * scale, "SPACE  DEL  DONE", scale, theme.text, w - 36 * scale); text(x + 18 * scale, y + 174 * scale, "A TYPE  START SAVE  B CANCEL", scale, theme.selected, w - 36 * scale); }
     present();
@@ -344,7 +384,7 @@ static void input_loop(void) {
     uint32_t k = keys_now();
     uint32_t quit_chord = (1u << BTN_START) | (1u << BTN_SELECT);
     if ((k & quit_chord) == quit_chord && (previous_keys & quit_chord) != quit_chord) { quit_requested = 1; previous_keys = k; return; }
-    if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) do_delete(); else do_paste(); mode = MODE_NORMAL; } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
+    if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) { do_delete(); mode = MODE_NORMAL; } else do_paste(); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_CONFLICT) { if (pressed(k, BTN_LEFT)) conflict_choice = (conflict_choice + 2) % 3; if (pressed(k, BTN_RIGHT)) conflict_choice = (conflict_choice + 1) % 3; if (pressed(k, BTN_A)) paste_items(conflict_index, conflict_choice); if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
 }
 
 int main(void) {

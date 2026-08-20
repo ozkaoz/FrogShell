@@ -78,6 +78,7 @@ static char prompt[MAX_PATH], prompt_original[MAX_PATH];
 static int keyboard_row, keyboard_col;
 static char status_text[160];
 static int status_frames;
+static char info_text[256];
 
 static void die_signal(int sig) { (void)sig; quit_requested = 1; }
 static int64_t now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000; }
@@ -272,6 +273,8 @@ static int copy_tree(const char *src, const char *dst) {
 }
 
 static int remove_tree(const char *p) { struct stat st; if (lstat(p, &st) != 0) return -1; if (S_ISDIR(st.st_mode)) { DIR *d = opendir(p); if (!d) return -1; struct dirent *e; int rc = 0; while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue; char c[MAX_PATH]; join_path(c, sizeof c, p, e->d_name); if (remove_tree(c) != 0) rc = -1; } closedir(d); if (rmdir(p) != 0) rc = -1; return rc; } return unlink(p); }
+static unsigned long long tree_size(const char *p) { struct stat st; if (lstat(p, &st) != 0) return 0; if (!S_ISDIR(st.st_mode)) return (unsigned long long)st.st_size; unsigned long long total = 0; DIR *d = opendir(p); if (!d) return 0; struct dirent *e; while ((e = readdir(d))) { if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue; char c[MAX_PATH]; join_path(c, sizeof c, p, e->d_name); total += tree_size(c); } closedir(d); return total; }
+static void size_label(unsigned long long bytes, char *out, size_t n) { if (bytes >= 1024ULL * 1024 * 1024) snprintf(out, n, "%.1f GB", (double)bytes / (1024.0 * 1024 * 1024)); else if (bytes >= 1024ULL * 1024) snprintf(out, n, "%.1f MB", (double)bytes / (1024.0 * 1024)); else if (bytes >= 1024) snprintf(out, n, "%.1f KB", (double)bytes / 1024.0); else snprintf(out, n, "%llu B", bytes); }
 
 static void unique_copy_name(const char *dst, char *out, size_t n) {
     if (access(dst, F_OK) != 0) { strncpy(out, dst, n - 1); out[n - 1] = 0; return; }
@@ -363,7 +366,7 @@ static void draw(void) {
         text(x + 14 * scale, y + 50 * scale, base(clipboard_paths[conflict_index]), scale, theme.text, w - 28 * scale);
         text(x + 14 * scale, y + 88 * scale, "A YES   B NO", scale, theme.selected, w - 28 * scale);
     }
-    if (mode == MODE_INFO) { int w = screen.w - 40 * scale; rect(20 * scale, screen.h / 2 - 70 * scale, w, 140 * scale, 0x303030); char p[MAX_PATH], info[160]; if (selected < entry_count) { join_path(p, sizeof p, current, entries[selected].name); struct stat st; stat(p, &st); snprintf(info, sizeof info, "%s  %s  %lld bytes", entries[selected].name, entries[selected].dir ? "folder" : "file", (long long)st.st_size); text(32 * scale, screen.h / 2 - 35 * scale, info, scale, theme.text, w - 24 * scale); } text(32 * scale, screen.h / 2 + 10 * scale, "B CLOSE", scale, theme.selected, w - 24 * scale); }
+    if (mode == MODE_INFO) { int w = screen.w - 40 * scale; rect(20 * scale, screen.h / 2 - 70 * scale, w, 140 * scale, 0x303030); text(32 * scale, screen.h / 2 - 35 * scale, info_text, scale, theme.text, w - 24 * scale); text(32 * scale, screen.h / 2 + 10 * scale, "B CLOSE", scale, theme.selected, w - 24 * scale); }
     if (mode == MODE_KEYBOARD) { int w = screen.w - 30 * scale, x = 15 * scale, y = screen.h / 2 - 100 * scale; rect(x, y, w, 190 * scale, 0x303030); text(x + 12 * scale, y + 12 * scale, prompt, scale, theme.selected, w - 24 * scale); for (int r = 0; r < 4; r++) text(x + 18 * scale, y + 48 * scale + r * 24 * scale, kbd_rows[r], scale, r == keyboard_row ? theme.selected : theme.text, w - 36 * scale); text(x + 18 * scale, y + 150 * scale, "SPACE  DEL  DONE", scale, theme.text, w - 36 * scale); text(x + 18 * scale, y + 174 * scale, "A TYPE  START SAVE  B CANCEL", scale, theme.selected, w - 36 * scale); }
     present();
 }
@@ -392,7 +395,13 @@ static void actions_input(uint32_t k) {
     case 3: if (selected < entry_count && strcmp(entries[selected].name, ".. ")) begin_keyboard(entries[selected].name, entries[selected].name); break;
     case 4: mode = MODE_CONFIRM; confirm_kind = 1; break;
     case 5: begin_keyboard("", NULL); break;
-    case 6: mode = MODE_INFO; break;
+    case 6:
+        if (selected < entry_count && strcmp(entries[selected].name, ".. ")) {
+            char p[MAX_PATH], size[32]; join_path(p, sizeof p, current, entries[selected].name);
+            size_label(tree_size(p), size, sizeof size);
+            snprintf(info_text, sizeof info_text, "%s  %s  %s", entries[selected].name, entries[selected].dir ? "Folder" : "File", size);
+        } else strcpy(info_text, "Nothing selected");
+        mode = MODE_INFO; break;
     default: break;
     }
 }

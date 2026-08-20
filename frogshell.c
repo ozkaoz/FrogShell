@@ -55,6 +55,13 @@ static stbtt_fontinfo font_info;
 static unsigned char *font_buffer;
 static float font_scale;
 static int font_loaded;
+/* Keep rasterized glyphs resident, just like the FrogUI/picoarch font path.
+ * Reallocating a bitmap for every character on every frame caused both
+ * flicker and missing/partially drawn glyphs on the target. */
+struct glyph_cache { int valid, w, h, xoff, yoff; unsigned char *bmp; };
+static struct glyph_cache glyphs[2][128];
+static float glyph_scale[2] = { -1.0f, -1.0f };
+static int glyph_baseline[2];
 static Entry entries[MAX_ENTRIES];
 static int entry_count, selected, scroll;
 static char current[MAX_PATH] = ROOT;
@@ -105,7 +112,7 @@ static int load_font_file(const char *name) {
     if (!buf || fread(buf, 1, (size_t)size, f) != (size_t)size) { free(buf); fclose(f); return 0; }
     fclose(f);
     if (!stbtt_InitFont(&font_info, buf, stbtt_GetFontOffsetForIndex(buf, 0))) { free(buf); return 0; }
-    free(font_buffer); font_buffer = buf; font_loaded = 1; font_scale = stbtt_ScaleForPixelHeight(&font_info, 13.0f); return 1;
+    free(font_buffer); font_buffer = buf; font_loaded = 1; font_scale = stbtt_ScaleForPixelHeight(&font_info, 18.0f); return 1;
 }
 
 static void load_selected_font(void) {
@@ -183,18 +190,38 @@ static int screen_open(void) {
 static void screen_close(void) { if (screen.mem) munmap(screen.mem, screen.len); if (screen.fd >= 0) close(screen.fd); free(screen.canvas); memset(&screen, 0, sizeof screen); screen.fd = -1; }
 static void clear(uint32_t c) { for (int y = 0; y < screen.h; y++) for (int x = 0; x < screen.w; x++) screen.canvas[(size_t)y * screen.w + x] = c; }
 static void rect(int x, int y, int w, int h, uint32_t c) { if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; } if (x + w > screen.w) w = screen.w - x; if (y + h > screen.h) h = screen.h - y; if (w <= 0 || h <= 0) return; for (int yy = y; yy < y + h; yy++) for (int xx = x; xx < x + w; xx++) screen.canvas[(size_t)yy * screen.w + xx] = c; }
+static void glyph_cache_reset(int slot) {
+    for (int i = 0; i < 128; i++) { free(glyphs[slot][i].bmp); glyphs[slot][i].bmp = NULL; glyphs[slot][i].valid = 0; }
+}
+
 static void text(int x, int y, const char *s, int scale, uint32_t c, int max) {
     int start = x;
     if (font_loaded) {
-        float sc = font_scale * scale;
-        int ascent, descent, gap; stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &gap);
-        int baseline = y + (int)(ascent * sc);
+        int slot = scale > 1 ? 1 : 0;
+        float sc = font_scale * (slot + 1);
+        if (glyph_scale[slot] != sc) {
+            glyph_cache_reset(slot); glyph_scale[slot] = sc;
+            int ascent, descent, gap; stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &gap);
+            glyph_baseline[slot] = (int)(ascent * sc);
+        }
+        int baseline = y + glyph_baseline[slot];
         for (; *s && x < start + max; s++) {
             unsigned char ch = (unsigned char)*s; if (ch >= 128) ch = '?';
-            int ax, lsb; stbtt_GetCodepointHMetrics(&font_info, ch, &ax, &lsb);
-            int w, h, xo, yo; unsigned char *bmp = stbtt_GetCodepointBitmap(&font_info, 0, sc, ch, &w, &h, &xo, &yo);
-            if (bmp) { for (int yy = 0; yy < h; yy++) for (int xx = 0; xx < w; xx++) if (bmp[yy * w + xx] > 80) rect(x + xo + xx, baseline + yo + yy, 1, 1, c); stbtt_FreeBitmap(bmp, NULL); }
-            x += (int)(ax * sc) + scale;
+            struct glyph_cache *g = &glyphs[slot][ch];
+            if (!g->valid) {
+                int gi = stbtt_FindGlyphIndex(&font_info, ch), x0, y0, x1, y1;
+                if (!gi) { g->valid = 1; continue; }
+                stbtt_GetGlyphBitmapBox(&font_info, gi, sc, sc, &x0, &y0, &x1, &y1);
+                g->w = x1 - x0; g->h = y1 - y0; g->xoff = x0; g->yoff = y0;
+                if (g->w > 0 && g->h > 0 && g->w <= 96 && g->h <= 96) {
+                    g->bmp = malloc((size_t)g->w * g->h);
+                    if (g->bmp) stbtt_MakeGlyphBitmap(&font_info, g->bmp, g->w, g->h, g->w, sc, sc, gi);
+                }
+                g->valid = 1;
+            }
+            if (g->bmp) for (int yy = 0; yy < g->h; yy++) for (int xx = 0; xx < g->w; xx++)
+                if (g->bmp[yy * g->w + xx] > 60) rect(x + g->xoff + xx, baseline + g->yoff + yy, 1, 1, c);
+            int ax, lsb; stbtt_GetCodepointHMetrics(&font_info, ch, &ax, &lsb); x += (int)(ax * sc) + scale;
         }
         return;
     }
@@ -258,11 +285,13 @@ static void do_rename(const char *name) { char old[MAX_PATH], dst[MAX_PATH]; joi
 static void do_new_folder(const char *name) { char dst[MAX_PATH]; join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || mkdir(dst, 0777) != 0) set_status("Create folder failed"); else set_status("Folder created"); scan(); }
 
 static void draw(void) {
-    int scale = screen.w >= 800 ? 2 : 1, row_h = 30 * scale, header = 34 * scale; clear(0x101010);
+    int scale = screen.w >= 800 ? 2 : 1, row_h = 42 * scale, header = 48 * scale; clear(0x101010);
     rect(0, 0, screen.w, header, theme.accent); char title[120]; snprintf(title, sizeof title, "FROGSHELL  %s", current); text(12, 9 * scale, title, scale, theme.selected, screen.w - 24);
     int visible = (screen.h - header - 42 * scale) / row_h; if (visible < 1) visible = 1; if (selected < scroll) scroll = selected; if (selected >= scroll + visible) scroll = selected - visible + 1;
     for (int i = 0; i < visible && scroll + i < entry_count; i++) { int idx = scroll + i, y = header + i * row_h; bool active = idx == selected; char p[MAX_PATH]; join_path(p, sizeof p, current, entries[idx].name); uint32_t bg = active ? theme.accent : 0x202020; rect(0, y, screen.w, row_h - 2, bg); if (marked_path(p)) rect(0, y, 5 * scale, row_h - 2, 0xF0C040); char label[300]; snprintf(label, sizeof label, "%s%s", entries[idx].name, entries[idx].dir ? "/" : ""); text(14 * scale, y + 8 * scale, label, scale, active ? theme.selected : theme.text, screen.w - 120 * scale); if (!entries[idx].dir) { char sz[32]; snprintf(sz, sizeof sz, "%lld", (long long)entries[idx].size); text(screen.w - (int)strlen(sz) * 8 * scale - 14 * scale, y + 8 * scale, sz, scale, active ? theme.selected : 0xAAAAAA, 100 * scale); } }
-    char footer[220]; snprintf(footer, sizeof footer, "A OPEN  B BACK  X ACTIONS  Y MARK  SELECT PASTE  START NEW FOLDER"); text(10 * scale, screen.h - 30 * scale, footer, scale, theme.text, screen.w - 20 * scale);
+    char footer[220]; snprintf(footer, sizeof footer, "A Open   B Back   X Menu   Y Mark   SELECT Paste   START New");
+    rect(0, screen.h - 34 * scale, screen.w, 34 * scale, 0x181818);
+    text(12 * scale, screen.h - 27 * scale, footer, scale, theme.text, screen.w - 24 * scale);
     if (status_frames > 0) { int w = (int)strlen(status_text) * 8 * scale + 24 * scale; rect((screen.w - w) / 2, screen.h - 68 * scale, w, 28 * scale, theme.accent); text((screen.w - w) / 2 + 12 * scale, screen.h - 61 * scale, status_text, scale, theme.selected, w - 24 * scale); }
     if (mode == MODE_ACTIONS) { int w = 250 * scale, h = action_count * row_h + 20 * scale, x = (screen.w - w) / 2, y = (screen.h - h) / 2; rect(x, y, w, h, 0x303030); for (int i = 0; i < action_count; i++) { bool a = i == menu_item; if (a) rect(x + 4 * scale, y + 8 * scale + i * row_h, w - 8 * scale, row_h - 2, theme.accent); text(x + 18 * scale, y + 15 * scale + i * row_h, action_names[i], scale, a ? theme.selected : theme.text, w - 30 * scale); } }
     if (mode == MODE_CONFIRM) { int w = 430 * scale, x = (screen.w - w) / 2; rect(x, screen.h / 2 - 48 * scale, w, 96 * scale, 0x303030); text(x + 18 * scale, screen.h / 2 - 28 * scale, confirm_kind == 1 ? "Delete selected item(s)?" : "Paste into this folder?", scale, theme.text, w - 36 * scale); text(x + 18 * scale, screen.h / 2 + 10 * scale, "A YES   B CANCEL", scale, theme.selected, w - 36 * scale); }
@@ -301,7 +330,7 @@ static void actions_input(uint32_t k) {
 }
 
 static void normal_input(uint32_t k) {
-    int visible = (screen.h - 34 * (screen.w >= 800 ? 2 : 1) - 42 * (screen.w >= 800 ? 2 : 1)) / (30 * (screen.w >= 800 ? 2 : 1)); if (visible < 1) visible = 1;
+    int visible = (screen.h - 48 * (screen.w >= 800 ? 2 : 1) - 34 * (screen.w >= 800 ? 2 : 1)) / (42 * (screen.w >= 800 ? 2 : 1)); if (visible < 1) visible = 1;
     if (pressed(k, BTN_UP) && selected > 0) selected--; if (pressed(k, BTN_DOWN) && selected + 1 < entry_count) selected++; if (pressed(k, BTN_L1)) selected -= visible; if (pressed(k, BTN_R1)) selected += visible; if (selected < 0) selected = 0; if (selected >= entry_count) selected = entry_count - 1;
     if (pressed(k, BTN_Y)) toggle_mark();
     if (pressed(k, BTN_SELECT)) { confirm_kind = 2; mode = clipboard[0] ? MODE_CONFIRM : MODE_NORMAL; if (!clipboard[0]) set_status("Clipboard is empty"); }
@@ -312,7 +341,10 @@ static void normal_input(uint32_t k) {
 }
 
 static void input_loop(void) {
-    uint32_t k = keys_now(); if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) do_delete(); else do_paste(); mode = MODE_NORMAL; } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
+    uint32_t k = keys_now();
+    uint32_t quit_chord = (1u << BTN_START) | (1u << BTN_SELECT);
+    if ((k & quit_chord) == quit_chord && (previous_keys & quit_chord) != quit_chord) { quit_requested = 1; previous_keys = k; return; }
+    if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) do_delete(); else do_paste(); mode = MODE_NORMAL; } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
 }
 
 int main(void) {

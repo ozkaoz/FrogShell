@@ -165,7 +165,10 @@ static int read_geometry(int *w, int *h) {
 
 static int screen_open(void) {
     int logical_w, logical_h; read_geometry(&logical_w, &logical_h);
-    memset(&screen, 0, sizeof screen); screen.fd = open("/dev/fb1", O_RDWR); if (screen.fd < 0) return -1;
+    /* Standalone apps own the main framebuffer after picoarch hands off.
+     * fb1 is the optional battery/volume overlay and is not a drawable panel
+     * on every target (including R36SX). */
+    memset(&screen, 0, sizeof screen); screen.fd = open("/dev/fb0", O_RDWR); if (screen.fd < 0) return -1;
     struct fb_fix_screeninfo fix;
     if (ioctl(screen.fd, FBIOGET_VSCREENINFO, &screen.vi) < 0 || ioctl(screen.fd, FBIOGET_FSCREENINFO, &fix) < 0 || !fix.smem_len) return -1;
     screen.w = screen.vi.xres; screen.h = screen.vi.yres; screen.pitch = fix.line_length;

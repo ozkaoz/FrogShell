@@ -40,7 +40,7 @@ static const char *key_names[BTN_COUNT] = {
     "LEFT", "RIGHT", "UP", "DOWN", "A", "B", "L1", "R1", "X", "Y", "SELECT", "START"
 };
 
-typedef struct { int fd, w, h, pitch, bytespp; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
+typedef struct { int fd, w, h, pitch, bytespp, rotation; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
 typedef struct { char name[256]; int dir; off_t size; time_t modified; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
 typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_REWRITE, MODE_KEYBOARD, MODE_INFO } Mode;
@@ -166,15 +166,15 @@ static void configure_layer(void) {
 static uint32_t channel(uint32_t c, const struct fb_bitfield *f) { if (!f->length) return 0; return (((c * ((1u << f->length) - 1u) + 127u) / 255u) << f->offset); }
 static uint32_t pack(const Screen *s, uint32_t rgb) { return channel(rgb >> 16 & 255, &s->vi.red) | channel(rgb >> 8 & 255, &s->vi.green) | channel(rgb & 255, &s->vi.blue); }
 
-static int read_geometry(int *w, int *h) {
-    *w = 640; *h = 480; FILE *f = fopen(DEVICE_FILE, "r"); char l[128], k[64], v[64];
+static int read_geometry(int *w, int *h, int *rotation) {
+    *w = 640; *h = 480; *rotation = 0; FILE *f = fopen(DEVICE_FILE, "r"); char l[128], k[64], v[64];
     if (!f) return 0;
-    while (fgets(l, sizeof l, f) && sscanf(l, "%63[^=]=%63s", k, v) == 2) { if (!strcmp(k, "TF_PANEL_W")) *w = atoi(v); else if (!strcmp(k, "TF_PANEL_H")) *h = atoi(v); }
+    while (fgets(l, sizeof l, f) && sscanf(l, "%63[^=]=%63s", k, v) == 2) { if (!strcmp(k, "TF_PANEL_W")) *w = atoi(v); else if (!strcmp(k, "TF_PANEL_H")) *h = atoi(v); else if (!strcmp(k, "TF_ROTATE")) *rotation = atoi(v); }
     fclose(f); if (*w < 320 || *w > 1920) *w = 640; if (*h < 240 || *h > 1080) *h = 480; return 0;
 }
 
 static int screen_open(void) {
-    int logical_w, logical_h; read_geometry(&logical_w, &logical_h);
+    int logical_w, logical_h, rotation; read_geometry(&logical_w, &logical_h, &rotation);
     /* Standalone apps own the main framebuffer after picoarch hands off.
      * fb1 is the optional battery/volume overlay and is not a drawable panel
      * on every target (including R36SX). */
@@ -187,6 +187,11 @@ static int screen_open(void) {
     if (screen.mem == MAP_FAILED) { screen.mem = NULL; return -1; }
     screen.canvas = calloc((size_t)logical_w * logical_h, sizeof(uint32_t));
     if (!screen.canvas) return -1;
+    /* Only apply the profile rotation when the framebuffer is portrait and
+     * the logical panel is landscape. R36SX and desktop/dev fallbacks remain
+     * direct-mapped. */
+    screen.rotation = (screen.vi.xres < screen.vi.yres && logical_w > logical_h) ? rotation : 0;
+    if (screen.rotation != 90 && screen.rotation != 180 && screen.rotation != 270) screen.rotation = 0;
     screen.w = logical_w; screen.h = logical_h; return 0;
 }
 
@@ -235,7 +240,20 @@ static void present(void) {
     for (int y = 0; y < screen.vi.yres; y++) {
         unsigned char *row = screen.mem + (size_t)(y + screen.vi.yoffset) * screen.pitch;
         for (int x = 0; x < screen.vi.xres; x++) {
-            int lx = x * screen.w / screen.vi.xres, ly = y * screen.h / screen.vi.yres;
+            int fx = x, fy = y, lx, ly;
+            if (screen.rotation == 90) {
+                lx = fy * screen.w / screen.vi.yres;
+                ly = screen.h - 1 - fx * screen.h / screen.vi.xres;
+            } else if (screen.rotation == 180) {
+                lx = screen.w - 1 - fx * screen.w / screen.vi.xres;
+                ly = screen.h - 1 - fy * screen.h / screen.vi.yres;
+            } else if (screen.rotation == 270) {
+                lx = screen.w - 1 - fy * screen.w / screen.vi.yres;
+                ly = fx * screen.h / screen.vi.xres;
+            } else {
+                lx = fx * screen.w / screen.vi.xres;
+                ly = fy * screen.h / screen.vi.yres;
+            }
             uint32_t p = pack(&screen, screen.canvas[(size_t)ly * screen.w + lx]);
             if (screen.bytespp == 4) ((uint32_t *)row)[x + screen.vi.xoffset] = p; else ((uint16_t *)row)[x + screen.vi.xoffset] = (uint16_t)p;
         }

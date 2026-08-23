@@ -385,7 +385,27 @@ static void draw(void) {
         text(x + 14 * scale, y + 88 * scale, "A YES   B NO", scale, theme.selected, w - 28 * scale);
     }
     if (mode == MODE_INFO) { int w = screen.w - 40 * scale; rect(20 * scale, screen.h / 2 - 70 * scale, w, 140 * scale, 0x303030); text(32 * scale, screen.h / 2 - 35 * scale, info_text, scale, theme.text, w - 24 * scale); text(32 * scale, screen.h / 2 + 10 * scale, "B CLOSE", scale, theme.selected, w - 24 * scale); }
-    if (mode == MODE_KEYBOARD) { int w = screen.w - 30 * scale, x = 15 * scale, y = screen.h / 2 - 100 * scale; rect(x, y, w, 190 * scale, 0x303030); text(x + 12 * scale, y + 12 * scale, prompt, scale, theme.selected, w - 24 * scale); for (int r = 0; r < 4; r++) text(x + 18 * scale, y + 48 * scale + r * 24 * scale, kbd_rows[r], scale, r == keyboard_row ? theme.selected : theme.text, w - 36 * scale); text(x + 18 * scale, y + 150 * scale, "SPACE  DEL  DONE", scale, theme.text, w - 36 * scale); text(x + 18 * scale, y + 174 * scale, "A TYPE  START SAVE  B CANCEL", scale, theme.selected, w - 36 * scale); }
+    if (mode == MODE_KEYBOARD) {
+        int w = screen.w - 30 * scale, x = 15 * scale, y = screen.h / 2 - 100 * scale;
+        rect(x, y, w, 190 * scale, 0x303030);
+        text(x + 12 * scale, y + 12 * scale, prompt, scale, theme.selected, w - 24 * scale);
+        for (int r = 0; r < 4; r++) {
+            int row_x = x + 18 * scale, row_y = y + 48 * scale + r * 24 * scale;
+            int row_len = (int)strlen(kbd_rows[r]);
+            for (int c = 0; c < row_len; c++) {
+                char glyph[2] = { kbd_rows[r][c], '\\0' };
+                bool active = r == keyboard_row;
+                bool chosen = active && c == keyboard_col;
+                if (chosen)
+                    rect(row_x + c * 8 * scale, row_y - 2 * scale, 8 * scale, 20 * scale, theme.accent);
+                text(row_x + c * 8 * scale, row_y, glyph, scale,
+                     chosen ? theme.selected : (active ? theme.selected : theme.text),
+                     8 * scale);
+            }
+        }
+        text(x + 18 * scale, y + 150 * scale, "SPACE  DEL  DONE", scale, theme.text, w - 36 * scale);
+        text(x + 18 * scale, y + 174 * scale, "A TYPE  START SAVE  B CANCEL", scale, theme.selected, w - 36 * scale);
+    }
     present();
 }
 

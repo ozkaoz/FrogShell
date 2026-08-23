@@ -393,7 +393,7 @@ static void draw(void) {
             int row_x = x + 18 * scale, row_y = y + 48 * scale + r * 24 * scale;
             int row_len = (int)strlen(kbd_rows[r]);
             for (int c = 0; c < row_len; c++) {
-                char glyph[2] = { kbd_rows[r][c], '\\0' };
+                char glyph[2] = { kbd_rows[r][c], '\0' };
                 bool active = r == keyboard_row;
                 bool chosen = active && c == keyboard_col;
                 if (chosen)

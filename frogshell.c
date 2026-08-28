@@ -2,7 +2,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/fb.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,15 +9,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <sys/ioctl.h>
 #include <sys/ipc.h>
-#include <sys/mman.h>
 #include <sys/shm.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
-#include <hcuapi/dis.h>
+#include "libretro.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -40,7 +37,7 @@ static const char *key_names[BTN_COUNT] = {
     "LEFT", "RIGHT", "UP", "DOWN", "A", "B", "L1", "R1", "X", "Y", "SELECT", "START"
 };
 
-typedef struct { int fd, w, h, pitch, bytespp, rotation; size_t len; unsigned char *mem; struct fb_var_screeninfo vi; uint32_t *canvas; } Screen;
+typedef struct { int w, h; uint32_t *canvas; uint16_t *output; } Screen;
 typedef struct { char name[256]; int dir; off_t size; time_t modified; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
 typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_REWRITE, MODE_KEYBOARD, MODE_INFO } Mode;
@@ -149,53 +146,27 @@ static bool pressed(uint32_t keys, int b) { return (keys & (1u << b)) && !(previ
 static void set_status(const char *s) { strncpy(status_text, s, sizeof status_text - 1); status_text[sizeof status_text - 1] = 0; status_frames = 150; }
 static bool path_contains(const char *parent, const char *child) { size_t n = strlen(parent); return !strcmp(parent, child) || (!strncmp(parent, child, n) && child[n] == '/'); }
 
-static void configure_layer(void) {
-    int fd = open("/dev/dis", O_RDWR);
-    if (fd < 0) return;
-    struct dis_layer_blend_order order;
-    memset(&order, 0, sizeof order);
-    order.distype = DIS_TYPE_HD;
-    order.main_layer = 2;
-    order.auxp_layer = 0;
-    order.gmas_layer = 3;
-    order.gmaf_layer = 1;
-    ioctl(fd, DIS_SET_LAYER_ORDER, &order);
-    close(fd);
-}
-
-static uint32_t channel(uint32_t c, const struct fb_bitfield *f) { if (!f->length) return 0; return (((c * ((1u << f->length) - 1u) + 127u) / 255u) << f->offset); }
-static uint32_t pack(const Screen *s, uint32_t rgb) { return channel(rgb >> 16 & 255, &s->vi.red) | channel(rgb >> 8 & 255, &s->vi.green) | channel(rgb & 255, &s->vi.blue); }
-
-static int read_geometry(int *w, int *h, int *rotation) {
-    *w = 640; *h = 480; *rotation = 0; FILE *f = fopen(DEVICE_FILE, "r"); char l[128], k[64], v[64];
+static int read_geometry(int *w, int *h) {
+    const char *ew = getenv("TF_PANEL_W"), *eh = getenv("TF_PANEL_H");
+    *w = ew ? atoi(ew) : 640; *h = eh ? atoi(eh) : 480;
+    FILE *f = fopen(DEVICE_FILE, "r"); char l[128], k[64], v[64];
     if (!f) return 0;
-    while (fgets(l, sizeof l, f) && sscanf(l, "%63[^=]=%63s", k, v) == 2) { if (!strcmp(k, "TF_PANEL_W")) *w = atoi(v); else if (!strcmp(k, "TF_PANEL_H")) *h = atoi(v); else if (!strcmp(k, "TF_ROTATE")) *rotation = atoi(v); }
+    while (fgets(l, sizeof l, f) && sscanf(l, "%63[^=]=%63s", k, v) == 2) { if (!ew && !strcmp(k, "TF_PANEL_W")) *w = atoi(v); else if (!eh && !strcmp(k, "TF_PANEL_H")) *h = atoi(v); }
     fclose(f); if (*w < 320 || *w > 1920) *w = 640; if (*h < 240 || *h > 1080) *h = 480; return 0;
 }
 
 static int screen_open(void) {
-    int logical_w, logical_h, rotation; read_geometry(&logical_w, &logical_h, &rotation);
-    /* Standalone apps own the main framebuffer after picoarch hands off.
-     * fb1 is the optional battery/volume overlay and is not a drawable panel
-     * on every target (including R36SX). */
-    memset(&screen, 0, sizeof screen); screen.fd = open("/dev/fb0", O_RDWR); if (screen.fd < 0) return -1;
-    struct fb_fix_screeninfo fix;
-    if (ioctl(screen.fd, FBIOGET_VSCREENINFO, &screen.vi) < 0 || ioctl(screen.fd, FBIOGET_FSCREENINFO, &fix) < 0 || !fix.smem_len) return -1;
-    screen.w = screen.vi.xres; screen.h = screen.vi.yres; screen.pitch = fix.line_length;
-    screen.bytespp = screen.vi.bits_per_pixel / 8; if (screen.bytespp != 2 && screen.bytespp != 4) return -1;
-    screen.len = fix.smem_len; screen.mem = mmap(NULL, screen.len, PROT_READ | PROT_WRITE, MAP_SHARED, screen.fd, 0);
-    if (screen.mem == MAP_FAILED) { screen.mem = NULL; return -1; }
-    screen.canvas = calloc((size_t)logical_w * logical_h, sizeof(uint32_t));
-    if (!screen.canvas) return -1;
-    /* Only apply the profile rotation when the framebuffer is portrait and
-     * the logical panel is landscape. R36SX and desktop/dev fallbacks remain
-     * direct-mapped. */
-    screen.rotation = (screen.vi.xres < screen.vi.yres && logical_w > logical_h) ? rotation : 0;
-    if (screen.rotation != 90 && screen.rotation != 180 && screen.rotation != 270) screen.rotation = 0;
-    screen.w = logical_w; screen.h = logical_h; return 0;
+    memset(&screen, 0, sizeof screen); read_geometry(&screen.w, &screen.h);
+    screen.canvas = calloc((size_t)screen.w * screen.h, sizeof(*screen.canvas));
+    screen.output = calloc((size_t)screen.w * screen.h, sizeof(*screen.output));
+    return screen.canvas && screen.output ? 0 : -1;
 }
 
-static void screen_close(void) { if (screen.mem) munmap(screen.mem, screen.len); if (screen.fd >= 0) close(screen.fd); free(screen.canvas); memset(&screen, 0, sizeof screen); screen.fd = -1; }
+static void screen_close(void) { free(screen.canvas); free(screen.output); memset(&screen, 0, sizeof screen); }
+/* Both supported 640x480 and 854x480 panels are 480p displays. Width alone is
+ * not pixel density: treating 854 as a 2x canvas made SF3000 rows and glyphs
+ * twice the R36HD size. Only scale up on genuinely taller output modes. */
+static int ui_scale(void) { return screen.h >= 720 ? 2 : 1; }
 static void clear(uint32_t c) { for (int y = 0; y < screen.h; y++) for (int x = 0; x < screen.w; x++) screen.canvas[(size_t)y * screen.w + x] = c; }
 static void rect(int x, int y, int w, int h, uint32_t c) { if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; } if (x + w > screen.w) w = screen.w - x; if (y + h > screen.h) h = screen.h - y; if (w <= 0 || h <= 0) return; for (int yy = y; yy < y + h; yy++) for (int xx = x; xx < x + w; xx++) screen.canvas[(size_t)yy * screen.w + xx] = c; }
 static void glyph_cache_reset(int slot) {
@@ -236,28 +207,18 @@ static void text(int x, int y, const char *s, int scale, uint32_t c, int max) {
     for (; *s && x + 8 * scale <= start + max; s++, x += 8 * scale) { unsigned char ch = (unsigned char)*s; if (ch >= 128) ch = '?'; for (int r = 0; r < 8; r++) for (int col = 0; col < 8; col++) if (fontdata8x8[ch * 8 + r] & (0x80u >> col)) rect(x + col * scale, y + r * scale, scale, scale, c); }
 }
 
+static retro_video_refresh_t video_cb;
 static void present(void) {
-    for (int y = 0; y < screen.vi.yres; y++) {
-        unsigned char *row = screen.mem + (size_t)(y + screen.vi.yoffset) * screen.pitch;
-        for (int x = 0; x < screen.vi.xres; x++) {
-            int fx = x, fy = y, lx, ly;
-            if (screen.rotation == 90) {
-                lx = fy * screen.w / screen.vi.yres;
-                ly = screen.h - 1 - fx * screen.h / screen.vi.xres;
-            } else if (screen.rotation == 180) {
-                lx = screen.w - 1 - fx * screen.w / screen.vi.xres;
-                ly = screen.h - 1 - fy * screen.h / screen.vi.yres;
-            } else if (screen.rotation == 270) {
-                lx = screen.w - 1 - fy * screen.w / screen.vi.yres;
-                ly = fx * screen.h / screen.vi.xres;
-            } else {
-                lx = fx * screen.w / screen.vi.xres;
-                ly = fy * screen.h / screen.vi.yres;
-            }
-            uint32_t p = pack(&screen, screen.canvas[(size_t)ly * screen.w + lx]);
-            if (screen.bytespp == 4) ((uint32_t *)row)[x + screen.vi.xoffset] = p; else ((uint16_t *)row)[x + screen.vi.xoffset] = (uint16_t)p;
-        }
+    size_t count = (size_t)screen.w * screen.h;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t c = screen.canvas[i];
+        screen.output[i] = (uint16_t)(((c >> 8) & 0xF800u) |
+                                      ((c >> 5) & 0x07E0u) |
+                                      ((c >> 3) & 0x001Fu));
     }
+    if (video_cb)
+        video_cb(screen.output, (unsigned)screen.w, (unsigned)screen.h,
+                 (size_t)screen.w * sizeof(*screen.output));
 }
 
 static const char *base(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
@@ -346,7 +307,7 @@ static void do_rename(const char *name) { char old[MAX_PATH], dst[MAX_PATH]; joi
 static void do_new_folder(const char *name) { char dst[MAX_PATH]; join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || mkdir(dst, 0777) != 0) set_status("Create folder failed"); else set_status("Folder created"); scan(); }
 
 static void draw(void) {
-    int scale = screen.w >= 800 ? 2 : 1, row_h = 42 * scale, header = 48 * scale; clear(0x101010);
+    int scale = ui_scale(), row_h = 42 * scale, header = 48 * scale; clear(0x101010);
     rect(0, 0, screen.w, header, theme.accent); char title[120]; snprintf(title, sizeof title, "FROGSHELL  %s", current); text(12, 9 * scale, title, scale, theme.selected, screen.w - 24);
     int visible = (screen.h - header - 42 * scale) / row_h; if (visible < 1) visible = 1; if (selected < scroll) scroll = selected; if (selected >= scroll + visible) scroll = selected - visible + 1;
     for (int i = 0; i < visible && scroll + i < entry_count; i++) {
@@ -445,7 +406,8 @@ static void actions_input(uint32_t k) {
 }
 
 static void normal_input(uint32_t k) {
-    int visible = (screen.h - 48 * (screen.w >= 800 ? 2 : 1) - 34 * (screen.w >= 800 ? 2 : 1)) / (42 * (screen.w >= 800 ? 2 : 1)); if (visible < 1) visible = 1;
+    int scale = ui_scale();
+    int visible = (screen.h - 48 * scale - 34 * scale) / (42 * scale); if (visible < 1) visible = 1;
     if (pressed(k, BTN_UP) && selected > 0) selected--; if (pressed(k, BTN_DOWN) && selected + 1 < entry_count) selected++; if (pressed(k, BTN_L1)) selected -= visible; if (pressed(k, BTN_R1)) selected += visible; if (selected < 0) selected = 0; if (selected >= entry_count) selected = entry_count - 1;
     if (pressed(k, BTN_Y)) toggle_mark();
     if (pressed(k, BTN_SELECT)) { confirm_kind = 2; mode = clipboard[0] ? MODE_CONFIRM : MODE_NORMAL; if (!clipboard[0]) set_status("Clipboard is empty"); }
@@ -462,12 +424,63 @@ static void input_loop(void) {
     if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) { do_delete(); mode = MODE_NORMAL; } else do_paste(); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_CONFLICT) { if (pressed(k, BTN_LEFT)) conflict_choice = (conflict_choice + 2) % 3; if (pressed(k, BTN_RIGHT)) conflict_choice = (conflict_choice + 1) % 3; if (pressed(k, BTN_A)) { if (conflict_choice == 1) mode = MODE_REWRITE; else paste_items(conflict_index, conflict_choice == 2 ? 2 : 0); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_REWRITE) { if (pressed(k, BTN_A)) paste_items(conflict_index, 1); if (pressed(k, BTN_B)) mode = MODE_CONFLICT; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else normal_input(k); previous_keys = k;
 }
 
-int main(void) {
-    signal(SIGINT, die_signal); signal(SIGTERM, die_signal); load_theme(); load_selected_font(); load_keymap(); raw_keys = open_keys(); screen.fd = -1;
-    configure_layer();
-    if (screen_open() != 0) return 1;
-    scan();
-    int64_t last = 0;
-    while (!quit_requested) { int64_t t = now_ms(); if (t - last >= 16) { last = t; input_loop(); if (status_frames > 0) status_frames--; draw(); } else usleep(1000); }
-    clear(0); present(); screen_close(); if (raw_keys) shmdt((const void *)raw_keys); return 0;
+static retro_environment_t environ_cb;
+static retro_input_poll_t input_poll_cb;
+
+unsigned retro_api_version(void) { return RETRO_API_VERSION; }
+void retro_set_environment(retro_environment_t cb) {
+    environ_cb = cb;
+    bool no_game = true;
+    cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
+    enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
+    cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt);
 }
+void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
+void retro_set_audio_sample(retro_audio_sample_t cb) { (void)cb; }
+void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { (void)cb; }
+void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
+void retro_set_input_state(retro_input_state_t cb) { (void)cb; }
+void retro_get_system_info(struct retro_system_info *info) {
+    memset(info, 0, sizeof *info);
+    info->library_name = "FrogShell";
+    info->library_version = "1.0";
+    info->valid_extensions = "";
+}
+void retro_get_system_av_info(struct retro_system_av_info *info) {
+    memset(info, 0, sizeof *info);
+    info->geometry.base_width = info->geometry.max_width = (unsigned)screen.w;
+    info->geometry.base_height = info->geometry.max_height = (unsigned)screen.h;
+    info->geometry.aspect_ratio = (float)screen.w / screen.h;
+    info->timing.fps = 60.0;
+    info->timing.sample_rate = 44100.0;
+}
+void retro_init(void) {
+    quit_requested = 0; previous_keys = 0;
+    load_theme(); load_selected_font(); load_keymap(); raw_keys = open_keys();
+    if (screen_open() == 0) scan();
+}
+void retro_deinit(void) {
+    screen_close();
+    if (raw_keys) shmdt((const void *)raw_keys);
+    raw_keys = NULL;
+}
+bool retro_load_game(const struct retro_game_info *info) { (void)info; return screen.canvas != NULL; }
+void retro_unload_game(void) {}
+void retro_run(void) {
+    if (input_poll_cb) input_poll_cb();
+    input_loop();
+    if (status_frames > 0) status_frames--;
+    draw();
+    if (quit_requested && environ_cb) environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
+}
+void retro_reset(void) { scan(); }
+unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
+size_t retro_serialize_size(void) { return 0; }
+bool retro_serialize(void *d, size_t s) { (void)d; (void)s; return false; }
+bool retro_unserialize(const void *d, size_t s) { (void)d; (void)s; return false; }
+void retro_cheat_reset(void) {}
+void retro_cheat_set(unsigned i, bool e, const char *c) { (void)i; (void)e; (void)c; }
+void *retro_get_memory_data(unsigned id) { (void)id; return NULL; }
+size_t retro_get_memory_size(unsigned id) { (void)id; return 0; }
+bool retro_load_game_special(unsigned t, const struct retro_game_info *i, size_t n) { (void)t; (void)i; (void)n; return false; }
+void retro_set_controller_port_device(unsigned p, unsigned d) { (void)p; (void)d; }

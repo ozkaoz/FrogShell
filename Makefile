@@ -8,14 +8,14 @@ CFLAGS := -mips32r2 -march=mips32r2 -mtune=24kc -mfp32 -mhard-float -mlong-calls
 LDFLAGS := -mips32r2 -mhard-float -mfp32 -EL --sysroot=$(SYSROOT) -L$(SYSROOT)/usr/lib
 
 FONT_SOURCE ?= ../picoarch/libpicofe/fonts.c
-TARGET ?= ../sf3000_treefrogui/sdcard/cubegm/frogshell
+TARGET ?= ../sf3000_treefrogui/sdcard/cubegm/cores/frogshell_libretro.so
 
 .PHONY: all clean
 all: $(TARGET)
 
 $(TARGET): frogshell.c $(FONT_SOURCE)
-	$(CC) $(CFLAGS) frogshell.c $(FONT_SOURCE) $(LDFLAGS) \
-		-Wl,--gc-sections -lm -o $@
+	$(CC) $(CFLAGS) -fPIC -I../FrogUI frogshell.c $(FONT_SOURCE) $(LDFLAGS) \
+		-shared -Wl,--gc-sections -lm -o $@
 	$(CROSS)strip $@
 
 clean:

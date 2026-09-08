@@ -557,6 +557,7 @@ static void draw(void) {
 static void osk_submit_terminal(void) {
     terminal_submit(prompt);
     prompt[0] = 0;
+    terminal_set_input("");
     keyboard_symbols = 0; keyboard_shift = 0; keyboard_ctrl = 0; keyboard_alt = 0;
     keyboard_for_terminal = 0;
     mode = MODE_TERMINAL;
@@ -564,7 +565,7 @@ static void osk_submit_terminal(void) {
 
 static void osk_save_fm(void) {
     if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt);
-    keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0;
+    keyboard_symbols = 0; keyboard_shift = 0; keyboard_ctrl = 0; keyboard_alt = 0;
     mode = MODE_NORMAL;
 }
 
@@ -586,13 +587,26 @@ static void kbd_fn_do(int action) {
     else if (action == KBD_ACT_ALT) keyboard_alt = !keyboard_alt;
 }
 
+/* Segment start/end helpers for the bottom modifier row: keys span several
+ * grid columns (CTRL 0-1, ALT 2-3, SPACE 4-6, DEL 7, ENTER 8-9). Navigation
+ * must jump between KEYS, not columns, or moving inside a span looks like
+ * the pad did not respond. */
+static int kbd_seg_start(int col) { while (col > 0 && kbd_fn_action_at(col) == kbd_fn_action_at(col - 1)) col--; return col; }
+static int kbd_seg_end(int col)  { while (col < KBD_COLS - 1 && kbd_fn_action_at(col + 1) == kbd_fn_action_at(col)) col++; return col + 1; }
+
 static void keyboard_input(uint32_t k) {
     int rows = kbd_page_rows();
     /* Grid navigation: rows 0..3 are key rows, `rows` = modifier row. */
     if (pressed(k, BTN_UP)) keyboard_row = keyboard_row <= 0 ? rows : keyboard_row - 1;
     if (pressed(k, BTN_DOWN)) keyboard_row = (keyboard_row + 1) % (rows + 1);
-    if (pressed(k, BTN_LEFT)) keyboard_col = (keyboard_col + KBD_COLS - 1) % KBD_COLS;
-    if (pressed(k, BTN_RIGHT)) keyboard_col = (keyboard_col + 1) % KBD_COLS;
+    if (keyboard_row == rows) {
+        /* Modifier row: jump key-to-key so every press visibly moves. */
+        if (pressed(k, BTN_LEFT))  { int s = kbd_seg_start(keyboard_col); keyboard_col = s > 0 ? kbd_seg_start(s - 1) : kbd_seg_end(KBD_COLS - 1) - 1; }
+        if (pressed(k, BTN_RIGHT)) { int e = kbd_seg_end(keyboard_col); keyboard_col = e < KBD_COLS ? e : kbd_seg_start(0); }
+    } else {
+        if (pressed(k, BTN_LEFT)) keyboard_col = (keyboard_col + KBD_COLS - 1) % KBD_COLS;
+        if (pressed(k, BTN_RIGHT)) keyboard_col = (keyboard_col + 1) % KBD_COLS;
+    }
     /* X doubles as SPACE without replacing the on-grid SPACE key. */
     if (pressed(k, BTN_X)) { size_t n = strlen(prompt); if (n + 1 < sizeof prompt) { prompt[n] = ' '; prompt[n + 1] = 0; } }
     if (pressed(k, BTN_A)) {

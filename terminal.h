@@ -7,8 +7,8 @@
  *
  * Bounded ring buffers only: 512 scrollback lines, 32 history entries.
  * 'yes' can flood output without growing RAM. The caller owns the render;
- * terminal_draw_*() helpers expose the text to draw with the existing
- * font/theme/scale system. */
+ * terminal_line_count()/terminal_line()/terminal_prompt_line() expose the
+ * text to draw with the existing font/theme/scale system. */
 
 #define TERM_LINES   512
 #define TERM_COLS     128

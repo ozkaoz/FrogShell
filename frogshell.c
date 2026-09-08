@@ -78,13 +78,18 @@ static int menu_item, confirm_kind;
 static int conflict_index, conflict_choice;
 static char prompt[MAX_PATH], prompt_original[MAX_PATH];
 static int keyboard_row, keyboard_col;
-static int keyboard_symbols;   /* 0 = letters page, 1 = symbols page (terminal only) */
+static int keyboard_symbols;   /* 0 = letters page, 1 = symbols page */
 static int keyboard_for_terminal; /* keyboard session belongs to the terminal */
-static int keyboard_shift;     /* 0 = abc (terminal default), 1 = ABC; FM is always ABC */
+static int keyboard_shift;     /* caps state, unified for FM and terminal */
 static int keyboard_ctrl;      /* sticky CTRL for the terminal virtual keyboard */
-static int keyboard_alt;       /* sticky ALT for the terminal virtual keyboard */static char status_text[160];
+static int keyboard_alt;       /* sticky ALT for the terminal virtual keyboard */
+static char status_text[160];
 static int status_frames;
 static char info_text[256];
+
+/* Frame-skip state: when nothing visual changed, retro_run re-presents the
+ * last converted buffer instead of redrawing the whole canvas. */
+static int frame_dirty;   /* any input/process/terminal activity this frame */
 
 /* SIGINT/SIGTERM handler kept for the process runner: when FrogShell is
  * killed externally the child process group is cleaned up in retro_deinit. */
@@ -263,6 +268,7 @@ static void scan(void) {
     if (selected >= entry_count) selected = entry_count ? entry_count - 1 : 0;
     if (selected < 0) selected = 0;
     scroll = selected >= 10 ? selected - 9 : 0;
+    frame_dirty = 1;   /* listing changed: redraw even if selection did not */
 }
 
 static bool marked_path(const char *p) { for (int i = 0; i < marked_count; i++) if (!strcmp(marked[i], p)) return true; return false; }
@@ -333,7 +339,7 @@ static const char *menu_action_name(int i) {
     if (dev) { if (i < base) return action_names[i]; return action_names[action_count - 1]; } /* Cancel last */
     return action_names[i]; /* no DEV: original 8-entry menu untouched */
 }
-static void begin_keyboard(const char *initial, const char *old) { strncpy(prompt, initial ? initial : "", sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; strncpy(prompt_original, old ? old : "", sizeof prompt_original - 1); prompt_original[sizeof prompt_original - 1] = 0; keyboard_row = 1; keyboard_col = 0; keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0; keyboard_shift = keyboard_for_terminal ? 0 : 1; mode = MODE_KEYBOARD; }
+static void begin_keyboard(const char *initial, const char *old) { strncpy(prompt, initial ? initial : "", sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; strncpy(prompt_original, old ? old : "", sizeof prompt_original - 1); prompt_original[sizeof prompt_original - 1] = 0; keyboard_row = 1; keyboard_col = 0; keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0; keyboard_shift = 0; mode = MODE_KEYBOARD; }
 static const char *kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM_-" };
 /* Symbols page: 4 rows. Rows 2/3 keep their fixed key at col 9, so their text
  * covers cols 0-8 (9 chars). Rows 0/1 are full 10 chars. */
@@ -558,6 +564,7 @@ static void osk_submit_terminal(void) {
 
 static void osk_save_fm(void) {
     if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt);
+    keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0;
     mode = MODE_NORMAL;
 }
 
@@ -726,13 +733,14 @@ static void physical_keyboard_input(void) {
                               &pgup, &pgdn, &ctrl_c);
         if (!ch && !enter && !bs && !up && !down && !left && !right &&
             !pgup && !pgdn && !ctrl_c) break;
+        frame_dirty = 1;   /* physical input changed something on screen */
         char *line = NULL;
         if (mode == MODE_TERMINAL) line = NULL;                    /* direct terminal input */
         else if (mode == MODE_KEYBOARD) line = prompt;             /* OSK prompt */
         if (ctrl_c) { if (mode == MODE_TERMINAL || keyboard_for_terminal) terminal_interrupt(); continue; }
         if (mode == MODE_TERMINAL) {
             /* type directly into the terminal line buffer */
-            if (ch) terminal_kbd_char(ch);
+            if (ch && ch >= 32) terminal_kbd_char(ch);
             else if (bs) terminal_kbd_backspace();
             else if (enter) terminal_kbd_submit();
             else if (up) terminal_history_move(-1);
@@ -742,8 +750,7 @@ static void physical_keyboard_input(void) {
             continue;
         }
         if (!line) continue;
-        if (ch) { size_t n = strlen(line); if (n + 1 < sizeof prompt) { line[n] = ch; line[n + 1] = 0; } }
-        else if (bs) { if (line[0]) line[strlen(line) - 1] = 0; }
+        if (ch && ch >= 32) { size_t n = strlen(line); if (n + 1 < sizeof prompt) { line[n] = ch; line[n + 1] = 0; } }        else if (bs) { if (line[0]) line[strlen(line) - 1] = 0; }
         else if (enter) {
             if (keyboard_for_terminal) osk_submit_terminal();
             else osk_save_fm();
@@ -756,6 +763,8 @@ static void input_loop(void) {
     uint32_t k = keys_now();
     uint32_t quit_chord = (1u << BTN_START) | (1u << BTN_SELECT);
     if ((k & quit_chord) == quit_chord && (previous_keys & quit_chord) != quit_chord) { quit_requested = 1; previous_keys = k; return; }
+    /* Any button edge or held state touching the UI marks the frame dirty. */
+    if (k != previous_keys) frame_dirty = 1;
     /* Hidden Developer Mode chord: 2s hold TOGGLES it. While the chord is up
      * the individual L1/R1/X/Y handling is suppressed. */
     int dev_evt = devmode_chord_update(k, now_ms());
@@ -806,22 +815,63 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
 }
 void retro_init(void) {
     quit_requested = 0; previous_keys = 0;
+    signal(SIGINT, die_signal);
     signal(SIGTERM, die_signal);
     load_theme(); load_selected_font(); load_keymap(); raw_keys = open_keys();
     if (screen_open() == 0) scan();
     devmode_refresh();
     terminal_init();
     usbkbd_init();
+    frame_dirty = 1;   /* first frame must render */
 }
 void retro_deinit(void) {
     terminal_free();
     usbkbd_close();
+    glyph_cache_reset(0); glyph_cache_reset(1);   /* free resident glyph bitmaps */
+    free(font_buffer); font_buffer = NULL; font_loaded = 0;
     screen_close();
     if (raw_keys) shmdt((const void *)raw_keys);
     raw_keys = NULL;
 }
 bool retro_load_game(const struct retro_game_info *info) { (void)info; return screen.canvas != NULL; }
 void retro_unload_game(void) {}
+/* Frame-skip: when nothing visual changed (no new input edges, no fresh
+ * process output, no active toast, same scroll/mode/selection), skip the
+ * full canvas redraw and re-present the last converted RGB565 buffer. */
+static Mode    last_drawn_mode;
+static int     last_drawn_status;
+static int     last_drawn_term_lines;
+static int     last_drawn_term_scroll;
+static int     last_drawn_selected;
+static int     last_drawn_menu_item;
+static int     last_drawn_devmode;
+
+static int frame_changed(void) {
+    if (frame_dirty) return 1;
+    if (mode != last_drawn_mode) return 1;
+    if (status_frames != last_drawn_status) return 1;
+    if (devmode_is_enabled() != last_drawn_devmode) return 1;
+    if (mode == MODE_TERMINAL || (mode == MODE_KEYBOARD && keyboard_for_terminal)) {
+        if (terminal_line_count() != last_drawn_term_lines) return 1;
+        if (terminal_scroll_get() != last_drawn_term_scroll) return 1;
+    }
+    if (mode == MODE_NORMAL || mode == MODE_ACTIONS) {
+        if (selected != last_drawn_selected || menu_item != last_drawn_menu_item) return 1;
+    }
+    return 0;
+}
+
+static void frame_mark_drawn(void) {
+    frame_dirty = 0;
+    last_drawn_mode = mode;
+    last_drawn_status = status_frames;
+    last_drawn_devmode = devmode_is_enabled();
+    last_drawn_term_lines = terminal_line_count();
+    last_drawn_term_scroll = terminal_scroll_get();
+    last_drawn_selected = selected;
+    last_drawn_menu_item = menu_item;
+}
+
 void retro_run(void) {
     if (input_poll_cb) input_poll_cb();
     input_loop();
@@ -829,12 +879,23 @@ void retro_run(void) {
     /* Poll the child regardless of the active view so it is reaped and its
      * pipe drained even if the user browses the file manager mid-run. */
     if (devmode_is_enabled() && (mode == MODE_TERMINAL || (mode == MODE_KEYBOARD && keyboard_for_terminal))) {
+        int before = terminal_line_count();
         terminal_update();
+        if (terminal_line_count() != before) frame_dirty = 1;
         if (terminal_exit_pending()) mode = MODE_NORMAL;
     } else if (process_is_running()) {
         process_poll(NULL);   /* reap + drain without rendering terminal lines */
     }
-    draw();
+    /* Wait for a process exit only when one is live: mark dirty so the
+     * [exit N] line renders the moment it appears. */
+    if (process_is_running()) frame_dirty = 1;
+    if (frame_changed()) {
+        draw();
+        frame_mark_drawn();
+    } else if (video_cb) {
+        video_cb(screen.output, (unsigned)screen.w, (unsigned)screen.h,
+                 (size_t)screen.w * sizeof(*screen.output));
+    }
     if (quit_requested && environ_cb) environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);
 }
 void retro_reset(void) { scan(); }

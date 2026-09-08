@@ -1,6 +1,74 @@
 # README-DEVMODE.md — Baseline del Developer Mode (FrogShell + TreeFrogUI)
 
-**Fecha:** 2026-09-08 (iteración 6 — modificadores teclado + OTG físico + commit/push)
+**Fecha:** 2026-09-08 (iteración 8 — grid 10 cols + flecha caps + auditoría profunda)
+
+## Iteración 8 — Grid 10 columnas + caps flecha + auditoría completa (2026-09-08)
+
+**Teclado (layout final, 10 columnas exactas, sin columna extra)**:
+```
+[1][2][3][4][5][6][7][8][9][0]
+[Q][W][E][R][T][Y][U][I][O][P]
+[A][S][D][F][G][H][J][K][L][⇧]   ⇧ = flecha Mayús dibujada (llena=caps ON, hueca=OFF)
+[Z][X][C][V][B][N][M][_][-][SYM]  ← SYM fijo en su posición en AMBAS páginas
+[CTRL ][ ALT  ][   SPACE    ][DEL][ENTER]
+```
+- **⇧ flecha de mayúsculas dibujada con rects** (independiente de la fuente, como los teclados físicos); fondo resaltado cuando caps activo.
+- **SYM persiste**: tecla fija (fila 3 col 9) en ambas páginas; el cursor se mantiene sobre SYM al cambiar de página (igual que ⇧).
+- **Fix toggle mayúsculas en FM**: la conversión a minúscula ya no depende del contexto — funciona igual en FM y terminal (FM arranca en ABC por defecto, terminal en abc).
+- Caps = solo case de letras (BloqMayus). Los `!@#$%` viven en la página SYM.
+- X = espacio (coexiste con la tecla SPACE).
+
+**Auditoría completa del ecosistema (subagent, hallazgos corregidos)**:
+- BUG terminal.c: wrap de línea >127 chars perdía el carácter desencadenante → corregido.
+- BUG ANSI: `[` cerraba el estado CSI inmediatamente → "31m" visible tras ESC[31m. Parser de 3 estados (ESC→CSI→final) corregido.
+- BUG process.c: `[exit N]` no aparecía si un nieto heredaba el pipe → exit code se decodifica al reap del hijo, sin esperar EOF.
+- BUG frogshell.c: zombie/bloqueo si el usuario volvía al FM con proceso vivo → `process_poll(NULL)` corre SIEMPRE que haya proceso, sin gate por mode.
+- BUG estado: leaks de keyboard_ctrl/alt en START/B/dev-off → helpers únicos `osk_submit_terminal()/osk_save_fm()` reemplazan la lógica triplicada; begin_keyboard resetea TODO el estado.
+- BUG devmode: stat()×2 por frame en el hot path → `is_enabled` ahora es latch puro en RAM; flags re-leídos en init y en cada toggle de chord (flag persistente tras boot sigue ganando).
+- Tecla fantasma (0,9) fila 0 símbolos → fila completada a 10 chars.
+- Duplicados eliminados: `join_path` con ramas idénticas unificadas; submit/rename triplicados unificados; rama muerta dev_evt>0 eliminada.
+- Muertos eliminados: OP_NONE, process_terminate, devmode_reset, devmode_chord_event, terminal_note_launched, terminal_reset, terminal_history_count/terminal_history, tab/esc del protocolo usbkbd.
+- Includes muertos eliminados (ctype, unistd, stdarg, string, sys/stat ×2 módulos).
+- is_stderr eliminado end-to-end del callback de output.
+- Menores: cwd se fija tras el check de proceso; physical_keyboard_input tras el check de chord; comentario de signal corregido (SIGTERM).
+
+Deploy iteración 8: solo `G:\cubegm\cores\frogshell_libretro.so` (SHA256 0805DF20...). Compilación 0 warnings. Pendiente de commit (junto con la confirmación de prueba física del layout nuevo).
+
+---
+
+## Iteración 7 — Layout teclado físico unificado + auditoría multi-consola (2026-09-08)
+
+**Teclado (layout físico real, unificado FM/terminal)**:
+- Grid de **11 columnas**: 10 de letras + **rail derecho** (col 10) con teclas laterales como un teclado físico: fila 2 = `abc/ABC` (encima de CTRL), fila 3 = `SYM`; en página símbolos el rail fila 2 = `abc` (volver a letras).
+- **Fila inferior de modificadores**: `CTRL(2) ALT(2) SPACE(4) DEL(1) ENTER(2)` — CTRL completamente abajo-izquierda, ALT a su derecha, luego SPACE, DEL y ENTER — igual en FM y terminal (solo el default de case difiere: FM=ABC, terminal=abc).
+- **ENTER unificado**: en terminal ejecuta el comando; en FM hace rename/new-folder (mismo look, acción por contexto). DONE eliminado.
+- **Tamaño reducido** (ENTER se salía en 480px): key_h 26px (era 30), panel 40 (era 44), gaps 3 (era 4), hint compacto. Grid completo: 40+6+4×29+29+5+14 ≈ 210px de alto en 480.
+- **Fix bug SYM→Space**: el toggle de página ya no resetea `keyboard_col` a 0; mantiene la columna (clamp solo si estaba en rail).
+- Fix: símbolos de la página SYM no se producían (kbd_char_at con lógica invertida).
+- Navegación LEFT/RIGHT salta celdas de rail vacías (filas 0-1 col 10); al caer verticalmente en fila sin rail desde col 10 → col 9.
+
+**AUDITORÍA DE PORTABILIDAD 7 CONSOLAS (evidencia en TreeFrogUI/picoarch/upstream)**:
+
+| Contrato | r36sx (v2.6/v2.7, R36HD) | sf3000 | sf3500 (SF3000HD, SF3100) | gb350 |
+|---|---|---|---|---|
+| Kernel 4.4.186-release | ✔ (modules.txt físico) | ✔ (usb_mode usa `uname -r`) | ✔ | ✔ (config idéntico R36SX) |
+| /bin/sh busybox ash | ✔ | ✔ (mismo template zhijack) | ✔ | ✔ |
+| /tmp tmpfs escribible | ✔ | ✔ | ✔ | ✔ |
+| joy_key shm (input) | ✔ | ✔ | ✔ | ✔ |
+| fork en proceso core | ✔ (tfhijack físico, FrogUI fork+waitpid, system() screenshots) | ✔ | ✔ | ✔ |
+| Rotación para cores | ninguna (fbwrite, canvas 640×480 landscape) | picoarch rota al presentar (854×480) | ídem sf3000 | ninguna (disp_frame 640×480) |
+| evdev /dev/input | ✔ confirmado (hcprojector stock) | ~ presumido (sin evidencia directa) | ✔ citado (sleep en kernel evdev) | ~ presumido |
+
+**Conclusiones de la auditoría**:
+1. **Sin bloqueadores estructurales** en ninguna familia: kernel/sh//tmp/shm/fork son contrato universal de boot.
+2. **Rotación**: el OSK dibuja canvas landscape y picoarch transforma al presentar (igual que FrogUI). NO re-introducir lógica TF_ROTATE en el core (fue eliminada deliberadamente en 7894d88/21d7abf).
+3. **Riesgo medio único**: HID de teclado USB OTG — sin evidencia de hid.ko en los firmwares stock (solo gadget/crypto .ko). `usbkbd.c` degrada limpio si no hay nodos. **Prueba física por familia requerida** para OTG.
+4. **RAM**: DEV añade ~100KB vs 128MB documentados (R36SX) — irrelevante.
+5. **dynarec caution** (plat_sdl.c L2699: fork perturba mapeos de gpsp): NO aplica — FrogShell corre en picoarch (no-hi) y nunca con cores dynarec; hijos exec-ean y mueren; fd>2 cerrados.
+
+Deploy iteración 7: solo `G:\cubegm\cores\frogshell_libretro.so` (SHA256 4CB0EEA7...). Compilación 0 warnings. Cambios pendientes de commit (se acumulan con la siguiente prueba física).
+
+---
 
 ## Iteración 6 — Fila modificadores + teclado físico OTG (2026-09-08)
 

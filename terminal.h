@@ -17,8 +17,6 @@
 
 void terminal_init(void);
 void terminal_free(void);
-void terminal_reset(const char *cwd);
-void terminal_note_launched(void);   /* FM launched a .sh/binary: echo $ line */
 void terminal_note_launched_path(const char *path);
 bool terminal_exit_pending(void);    /* `exit` builtin: leave the terminal view */
 
@@ -29,14 +27,12 @@ void terminal_submit(const char *cmd);      /* builtins + process launch */
 void terminal_interrupt(void);              /* SIGINT to running process */
 void terminal_set_cwd(const char *cwd);
 const char *terminal_get_cwd(void);
-void terminal_output(const char *buf, int len, int is_stderr);  /* process callback */
+void terminal_output(const char *buf, int len);  /* process callback */
 
 /* Render access */
 int  terminal_line_count(void);
 const char *terminal_line(int index);      /* 0..count-1, newest last */
 const char *terminal_prompt_line(void);     /* current input + cursor pos */
-int  terminal_history_count(void);
-const char *terminal_history(int index);
 
 /* Virtual keyboard integration */
 void terminal_kbd_char(char c);            /* from on-screen keyboard */

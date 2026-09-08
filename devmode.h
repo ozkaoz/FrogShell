@@ -25,7 +25,5 @@ int  devmode_is_enabled(void);
 void devmode_refresh(void);
 int  devmode_chord_update(uint32_t keys, int64_t now); /* +1 enabled, -1 disabled, 0 none */
 int  devmode_chord_active(void);
-int  devmode_chord_event(void);
-void devmode_reset(void);
 
 #endif

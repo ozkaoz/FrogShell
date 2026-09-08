@@ -1,11 +1,10 @@
 #define _GNU_SOURCE
-#include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
-#include <unistd.h>
 
 #include "devmode.h"
 #include "process.h"
@@ -39,18 +38,22 @@ static void line_push(const char *s) {
  * control characters so they cannot corrupt the renderer. */
 static char partial[TERM_COLS];
 static int  partial_len;
-static int  in_ansi;   /* 1 = inside ESC[ ... until final byte @ 0x40-0x7E */
+static int  ansi_state;   /* 0 = normal, 1 = after ESC, 2 = inside CSI [... */
 
-static void partial_reset(void) { partial_len = 0; in_ansi = 0; }
+static void partial_reset(void) { partial_len = 0; ansi_state = 0; }
 
 static void chunk_append(const char *buf, int len) {
     for (int i = 0; i < len; i++) {
         unsigned char c = (unsigned char)buf[i];
-        if (in_ansi) {
-            if (c >= 0x40 && c <= 0x7E) in_ansi = 0;
+        if (ansi_state == 1) {           /* ESC seen: '[' starts CSI, other final bytes end here */
+            ansi_state = (c == '[') ? 2 : 0;
             continue;
         }
-        if (c == 0x1B) { in_ansi = 1; continue; }
+        if (ansi_state == 2) {           /* CSI: closed by 0x40-0x7E */
+            if (c >= 0x40 && c <= 0x7E) ansi_state = 0;
+            continue;
+        }
+        if (c == 0x1B) { ansi_state = 1; continue; }
         if (c == '\n') {
             partial[partial_len] = 0;
             line_push(partial);
@@ -61,12 +64,16 @@ static void chunk_append(const char *buf, int len) {
         if (c == '\t') c = ' ';
         if (c < 0x20 || c == 0x7F) continue;
         if (partial_len < TERM_COLS - 1) partial[partial_len++] = (char)c;
-        else { partial[partial_len] = 0; line_push(partial); partial_len = 0; }
+        else {
+            partial[partial_len] = 0;
+            line_push(partial);
+            partial_len = 0;
+            partial[partial_len++] = (char)c;   /* keep the wrapping char */
+        }
     }
 }
 
-void terminal_output(const char *buf, int len, int is_stderr) {
-    (void)is_stderr;  /* v1 renders both streams identically */
+void terminal_output(const char *buf, int len) {
     chunk_append(buf, len);
 }
 
@@ -140,11 +147,6 @@ void terminal_interrupt(void) {
     if (process_is_running()) process_interrupt();
 }
 
-void terminal_note_launched(void) {
-    have_reported = false;
-    line_push("(launched from file manager)");
-}
-
 void terminal_note_launched_path(const char *path) {
     char echo[TERM_COLS];
     have_reported = false;
@@ -155,7 +157,8 @@ void terminal_note_launched_path(const char *path) {
 void terminal_update(void) {
     process_poll(terminal_output);
     if (!have_reported && !process_is_running() && process_exit_code() >= 0) {
-        report_exit(process_exit_code(), 0);
+        int code = process_exit_code();
+        report_exit(code, code > 128 ? code - 128 : 0);   /* 128+sig = signaled */
         have_reported = true;
     }
 }
@@ -185,11 +188,6 @@ void terminal_free(void) {
     process_shutdown();
 }
 
-void terminal_reset(const char *dir) {
-    terminal_init();
-    if (dir && dir[0]) snprintf(cwd, sizeof cwd, "%s", dir);
-}
-
 void terminal_set_cwd(const char *dir) { if (dir && dir[0]) snprintf(cwd, sizeof cwd, "%s", dir); }
 const char *terminal_get_cwd(void) { return cwd; }
 
@@ -212,18 +210,12 @@ void terminal_set_input(const char *s) {
     hist_browse = -1;
 }
 
-int terminal_history_count(void) { return hist_count; }
-const char *terminal_history(int index) {
-    if (index < 0 || index >= hist_count) return "";
-    return hist[index];
-}
-
 void terminal_history_move(int delta) {
     if (!hist_count) return;
     if (hist_browse < 0) { strcpy(saved_input, input_buf); hist_browse = hist_count - 1; }
     else hist_browse += delta;
     if (hist_browse < 0) { hist_browse = -1; strcpy(input_buf, saved_input); return; }
-    if (hist_browse >= hist_count) hist_browse = hist_count - 1;
+    if (hist_browse >= hist_count) { hist_browse = hist_count - 1; return; } /* stay at oldest */
     strcpy(input_buf, hist[hist_browse]);
 }
 

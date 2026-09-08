@@ -2,15 +2,12 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <unistd.h>
 
 #include "process.h"
 
@@ -122,24 +119,21 @@ void process_poll(process_output_cb on_output) {
             child_status = status;
             child_done = true;
             child_pid = -1;
+            last_exit = decode_status(child_status);  /* report even if a grandchild still holds the pipe */
         }
     }
     if (out_pipe[0] >= 0) {
         char buf[2048];
         for (;;) {
             ssize_t n = read(out_pipe[0], buf, sizeof buf);
-            if (n > 0) { if (on_output) on_output(buf, (int)n, 1); continue; }
+            if (n > 0) { if (on_output) on_output(buf, (int)n); continue; }
             if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
-                /* EOF / error: the child is gone and nothing more arrives. */
-                if (child_done) {
-                    close_fd(&out_pipe[0]);
-                    last_exit = decode_status(child_status);
-                }
+                /* EOF / error: nothing more will arrive from this pipe. */
+                close_fd(&out_pipe[0]);
+                break;
             }
-            break;
+            break;  /* EAGAIN: no data yet */
         }
-    } else if (child_done && last_exit < 0) {
-        last_exit = decode_status(child_status);
     }
 }
 
@@ -149,10 +143,6 @@ static void kill_group(int sig) {
 
 void process_interrupt(void) {
     if (process_is_running()) kill_group(SIGINT);
-}
-
-void process_terminate(void) {
-    if (process_is_running()) kill_group(SIGTERM);
 }
 
 void process_shutdown(void) {

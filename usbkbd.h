@@ -13,12 +13,11 @@ void usbkbd_init(void);
 void usbkbd_close(void);
 
 /* Poll pending key events. Returns the next printable character, 0 = none.
- * Special keys are delivered through the out-params:
- *   enter, backspace, up, down, left, right (arrows / history),
- *   pgup, pgdn (scrollback), ctrl_c (interrupt), tab, esc.  */
+ * Special keys are delivered through the out-params: enter, backspace,
+ * arrows, pgup/pgdn (scrollback) and ctrl_c (interrupt). */
 char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
                  int *left, int *right, int *pgup, int *pgdn,
-                 int *ctrl_c, int *tab, int *esc);
+                 int *ctrl_c);
 
 bool usbkbd_connected(void);
 

@@ -46,7 +46,7 @@ typedef struct { int w, h; uint32_t *canvas; uint16_t *output; } Screen;
 typedef struct { char name[256]; int dir; off_t size; time_t modified; } Entry;
 typedef struct { uint32_t text, accent, selected; } Theme;
 typedef enum { MODE_NORMAL, MODE_ACTIONS, MODE_CONFIRM, MODE_CONFLICT, MODE_REWRITE, MODE_KEYBOARD, MODE_INFO, MODE_TERMINAL } Mode;
-typedef enum { OP_NONE, OP_COPY, OP_CUT } Op;
+typedef enum { OP_COPY, OP_CUT } Op;
 
 static volatile sig_atomic_t quit_requested;
 static volatile uint32_t *raw_keys;
@@ -333,39 +333,43 @@ static const char *menu_action_name(int i) {
     if (dev) { if (i < base) return action_names[i]; return action_names[action_count - 1]; } /* Cancel last */
     return action_names[i]; /* no DEV: original 8-entry menu untouched */
 }
-static void begin_keyboard(const char *initial, const char *old) { strncpy(prompt, initial ? initial : "", sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; strncpy(prompt_original, old ? old : "", sizeof prompt_original - 1); prompt_original[sizeof prompt_original - 1] = 0; keyboard_row = 1; keyboard_col = 0; keyboard_symbols = 0; keyboard_shift = 0; mode = MODE_KEYBOARD; }static const char *kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM_-" };
-/* Terminal-only symbols page: exact 10-key rows for the grid layout. */
-static const char *kbd_sym_rows[] = { "/.,;:!\"'`", "()[]{}<>|&", "*=~+@#%^$_" };
-/* Shift page: what SHIFT+digits/letters produce on a physical keyboard. */
-static const char *kbd_shift_digits = "!@#$%^&*()";
-/* Function key row: every key spans a column range of the 10-col grid.
- * actions: 0=SPACE 1=DEL 2=DONE(fm) 3=SYM(term) 4=ENTER 5=SHIFT 6=CTRL 7=ALT */
-static int kbd_page_rows(void) { return keyboard_symbols ? 3 : 4; }
-static const char *kbd_row_src(int r) { return (keyboard_symbols ? kbd_sym_rows : kbd_rows)[r]; }
-/* Physical char for a key, applying the shift state. */
+static void begin_keyboard(const char *initial, const char *old) { strncpy(prompt, initial ? initial : "", sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; strncpy(prompt_original, old ? old : "", sizeof prompt_original - 1); prompt_original[sizeof prompt_original - 1] = 0; keyboard_row = 1; keyboard_col = 0; keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0; keyboard_shift = keyboard_for_terminal ? 0 : 1; mode = MODE_KEYBOARD; }
+static const char *kbd_rows[] = { "1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM_-" };
+/* Symbols page: 4 rows. Rows 2/3 keep their fixed key at col 9, so their text
+ * covers cols 0-8 (9 chars). Rows 0/1 are full 10 chars. */
+static const char *kbd_sym_rows[] = { "/.,;:!\"'`-", "()[]{}<>|&", "*=~+@#%^$", "?\\|~.-_+=" };
+/* Unified 10-column layout for FM and terminal. Last cell of row 2 is the
+ * shift/caps key (up-arrow glyph), last cell of row 3 is SYM; both stay in
+ * place on the symbols page. Bottom row: CTRL ALT SPACE DEL ENTER. */
+#define KBD_COLS 10
+enum { KBD_ACT_SPACE = 0, KBD_ACT_DEL, KBD_ACT_ENTER, KBD_ACT_SYM, KBD_ACT_SHIFT, KBD_ACT_CTRL, KBD_ACT_ALT };
+static int kbd_page_rows(void) { return 4; }   /* 3 letter/symbol rows + 1 extra row 3 on letters */
+/* Row text for the current page (letters or symbols): 4 rows each. */
+static const char *kbd_row_text(int r) {
+    return keyboard_symbols ? kbd_sym_rows[r & 3] : kbd_rows[r & 3];
+}
+/* Fixed-key cell (not a character): row 2 col 9 = caps, row 3 col 9 = SYM.
+ * Rows 0-1 are all characters. Same on both pages. */
+static int kbd_fixed_at(int r, int c) {
+    if (c != 9 || r < 2) return 0;
+    return r == 2 ? KBD_ACT_SHIFT : KBD_ACT_SYM;
+}
+/* Physical char for a grid cell, applying the shift (caps) state.
+ * Letters toggle case; everything else is unaffected. */
 static char kbd_char_at(int r, int c) {
-    char ch = kbd_row_src(r)[c];
-    if (keyboard_symbols) return ch;
-    if (keyboard_shift && r == 0 && c < 10) return kbd_shift_digits[c];
-    if (!keyboard_shift && keyboard_for_terminal && ch >= 'A' && ch <= 'Z')
+    const char *src = kbd_row_text(r);
+    char ch = src[c];
+    if (ch >= 'A' && ch <= 'Z' && !keyboard_shift)
         ch = (char)(ch - 'A' + 'a');
     return ch;
 }
-/* Modifier row layout (terminal): SPACE(2) SHIFT(2) CTRL(2) ALT(1) DEL(1) SYM(1) ENTER(1)
- * FM: SPACE(4) DEL(2) DONE(4) — unchanged from the original layout. */
+/* Bottom modifier row: CTRL(2) ALT(2) SPACE(4) DEL(1) ENTER(1). */
 static int kbd_fn_action_at(int col) {
-    if (keyboard_for_terminal) {
-        if (col <= 1) return 0;   /* SPACE */
-        if (col <= 3) return 5;   /* SHIFT */
-        if (col <= 5) return 6;   /* CTRL  */
-        if (col == 6) return 7;   /* ALT   */
-        if (col == 7) return 1;   /* DEL   */
-        if (col == 8) return 3;   /* SYM   */
-        return 4;                  /* ENTER */
-    }
-    if (col <= 3) return 0;
-    if (col <= 5) return 1;
-    return 2;
+    if (col <= 1) return KBD_ACT_CTRL;
+    if (col <= 3) return KBD_ACT_ALT;
+    if (col <= 6) return KBD_ACT_SPACE;
+    if (col == 7) return KBD_ACT_DEL;
+    return KBD_ACT_ENTER;
 }
 
 static void do_copy_or_cut(Op op) { char paths[MAX_MARKED][MAX_PATH]; int n = selected_paths(paths, MAX_MARKED); if (!n) { set_status("Nothing selected"); return; } clipboard_count = n; for (int i = 0; i < n; i++) strcpy(clipboard_paths[i], paths[i]); strcpy(clipboard, paths[0]); clipboard_op = op; set_status(op == OP_COPY ? "Copied to clipboard" : "Cut to clipboard"); }
@@ -374,71 +378,86 @@ static void do_delete(void) { char paths[MAX_MARKED][MAX_PATH]; int n = selected
 static void do_rename(const char *name) { char old[MAX_PATH], dst[MAX_PATH]; join_path(old, sizeof old, current, prompt_original); join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || rename(old, dst) != 0) set_status("Rename failed"); else set_status("Renamed"); scan(); }
 static void do_new_folder(const char *name) { char dst[MAX_PATH]; join_path(dst, sizeof dst, current, name); if (!name[0] || !under_root(dst) || mkdir(dst, 0777) != 0) set_status("Create folder failed"); else set_status("Folder created"); scan(); }
 
-/* On-screen keyboard, console-OSK style (Switch/Vita-like): boxed key grid
- * with a function row (SPACE/DEL/...) and a hint bar. Shared by the file
- * manager and the terminal; the caller decides the backdrop. */
+/* On-screen keyboard, console-OSK style with a physical layout: letter grid
+ * with a right rail (abc/ABC, SYM) and a bottom modifier row
+ * (CTRL ALT SPACE DEL ENTER). Shared by the file manager and the terminal. */
 static void draw_keyboard(int scale) {
     int rows = kbd_page_rows();
     /* Prompt panel */
-    int panel_h = 44 * scale;
-    int kb_x = 8 * scale, kb_w = screen.w - 16 * scale;
-    int prompt_y = screen.h / 2 - (rows * (34 * scale) + 52 * scale + panel_h) / 2;
+    int panel_h = 40 * scale;
+    int kb_x = 6 * scale, kb_w = screen.w - 12 * scale;
+    int total_h = panel_h + 6 * scale + rows * (26 * scale + 3 * scale) + 26 * scale + 3 * scale + 14 * scale;
+    int prompt_y = (screen.h - total_h) / 2;
     if (prompt_y < 4 * scale) prompt_y = 4 * scale;
     rect(kb_x, prompt_y, kb_w, panel_h, 0x303030);
     int carat = text_width(prompt, scale);
-    text(kb_x + 10 * scale, prompt_y + 14 * scale, prompt, scale, theme.selected, kb_w - 40 * scale);
-    rect(kb_x + 12 * scale + carat, prompt_y + 12 * scale, 8 * scale, 20 * scale, theme.accent); /* cursor */
-    /* Key grid: 10 columns of boxed keys */
+    text(kb_x + 10 * scale, prompt_y + 12 * scale, prompt, scale, theme.selected, kb_w - 40 * scale);
+    rect(kb_x + 12 * scale + carat, prompt_y + 10 * scale, 8 * scale, 20 * scale, theme.accent); /* cursor */
+    /* Key grid: 10 columns; fixed keys (caps arrow, SYM) integrated in their rows */
     int grid_y = prompt_y + panel_h + 6 * scale;
-    int key_w = (kb_w - 12 * scale) / 10;
-    int key_h = 30 * scale;
+    int key_w = (kb_w - 8 * scale) / KBD_COLS;
+    int key_h = 26 * scale;
+    int gap = 3 * scale;
     for (int r = 0; r < rows; r++) {
-        for (int c = 0; c < 10; c++) {
-            int kx = kb_x + 6 * scale + c * key_w, ky = grid_y + r * (key_h + 4 * scale);
+        for (int c = 0; c < KBD_COLS; c++) {
+            int kx = kb_x + 4 * scale + c * key_w, ky = grid_y + r * (key_h + gap);
             bool active = r == keyboard_row;
             bool chosen = active && c == keyboard_col;
+            int fixed = kbd_fixed_at(r, c);
             uint32_t box = chosen ? theme.accent : (active ? 0x404040 : 0x303030);
+            if (fixed == KBD_ACT_SHIFT && keyboard_shift) box = chosen ? theme.accent : 0x606060;
             rect(kx, ky, key_w - 2 * scale, key_h, box);
+            if (fixed == KBD_ACT_SHIFT) {
+                /* Up-arrow caps glyph, drawn with rects (font-independent):
+                 * filled when caps on, hollow when off. */
+                uint32_t g = chosen ? theme.selected : theme.text;
+                int cx = kx + (key_w - 2 * scale) / 2, cy = ky + key_h / 2;
+                int aw = 9 * scale, ah = 12 * scale;
+                for (int yy = 0; yy < ah; yy++) {
+                    int half = aw * yy / ah;             /* triangle widens downward */
+                    if (keyboard_shift) rect(cx - half / 2, cy - ah / 2 + yy, half > 0 ? half : 1, 1, g);
+                    else if (yy % 3 == 0) rect(cx - half / 2, cy - ah / 2 + yy, half > 0 ? half : 1, 1, g);
+                }
+                /* stem */
+                rect(cx - scale, cy + ah / 2 - 3 * scale, 2 * scale, 4 * scale, g);
+                continue;
+            }
+            if (fixed == KBD_ACT_SYM) {
+                text(kx + (key_w - 3 * 8 * scale) / 2 - scale, ky + (key_h - 14 * scale) / 2, "SYM", scale,
+                     chosen ? theme.selected : theme.text, key_w);
+                continue;
+            }
             char glyph[2] = { kbd_char_at(r, c), '\0' };
             text(kx + (key_w - 8 * scale) / 2 - scale, ky + (key_h - 14 * scale) / 2, glyph, scale,
                  chosen ? theme.selected : theme.text, key_w);
         }
     }
-    /* Function row: spans the same 10-column grid */
-    int fn_y = grid_y + rows * (key_h + 4 * scale);
+    /* Bottom modifier row: CTRL(2) ALT(2) SPACE(4) DEL(1) ENTER(1) over 10 cols */
+    int fn_y = grid_y + rows * (key_h + gap);
     bool fn_active = keyboard_row == rows;
-    for (int c = 0; c < 10; c++) {
+    for (int c = 0; c < KBD_COLS; c++) {
         int a = kbd_fn_action_at(c);
-        /* draw one label per action segment start */
         if (c == 0 || a != kbd_fn_action_at(c - 1)) {
             int span_end = c;
-            while (span_end < 10 && kbd_fn_action_at(span_end) == a) span_end++;
+            while (span_end < KBD_COLS && kbd_fn_action_at(span_end) == a) span_end++;
             int span_w = (span_end - c) * key_w;
-            int kx = kb_x + 6 * scale + c * key_w;
+            int kx = kb_x + 4 * scale + c * key_w;
             bool chosen = fn_active && keyboard_col >= c && keyboard_col < span_end;
-            bool latch = (a == 5 && keyboard_shift) || (a == 6 && keyboard_ctrl) || (a == 7 && keyboard_alt);
+            bool latch = (a == KBD_ACT_CTRL && keyboard_ctrl) || (a == KBD_ACT_ALT && keyboard_alt);
             uint32_t box = chosen ? theme.accent : (latch ? 0x606060 : 0x282828);
             rect(kx, fn_y, span_w - 2 * scale, key_h, box);
-            char shiftlabel[8];
-            const char *label;
-            if (!keyboard_for_terminal) label = a == 0 ? "SPACE" : a == 1 ? "DEL" : "DONE";
-            else if (a == 0) label = "SPACE";
-            else if (a == 1) label = "DEL";
-            else if (a == 3) label = "SYM";
-            else if (a == 4) label = "ENTER";
-            else if (a == 5) { snprintf(shiftlabel, sizeof shiftlabel, "%s", keyboard_shift ? "ABC" : "abc"); label = shiftlabel; }
-            else if (a == 6) label = "CTRL";
-            else label = "ALT";
+            const char *label = a == KBD_ACT_CTRL ? "CTRL" : a == KBD_ACT_ALT ? "ALT"
+                              : a == KBD_ACT_SPACE ? "SPACE" : a == KBD_ACT_DEL ? "DEL" : "ENTER";
             text(kx + (span_w - (int)strlen(label) * 8 * scale) / 2 - scale, fn_y + (key_h - 14 * scale) / 2, label, scale,
                  chosen ? theme.selected : theme.text, span_w);
         }
     }
     /* Hint bar */
-    int hint_y = fn_y + key_h + 6 * scale;
+    int hint_y = fn_y + key_h + 5 * scale;
     const char *hint = keyboard_for_terminal
         ? "A Type   X Space   B Back   L/R Hist   START Enter"
         : "A Type   X Space   B Cancel   START Save";
-    text(kb_x + 10 * scale, hint_y, hint, scale, theme.text, kb_w - 20 * scale);
+    text(kb_x + 8 * scale, hint_y, hint, scale, theme.text, kb_w - 16 * scale);
 }
 
 /* Transient status toast, shared by both views. */
@@ -527,31 +546,58 @@ static void draw(void) {
     present();
 }
 
+/* Single exit paths for the on-screen keyboard sessions: submit the terminal
+ * command or save the FM text, resetting ALL session state in one place. */
+static void osk_submit_terminal(void) {
+    terminal_submit(prompt);
+    prompt[0] = 0;
+    keyboard_symbols = 0; keyboard_shift = 0; keyboard_ctrl = 0; keyboard_alt = 0;
+    keyboard_for_terminal = 0;
+    mode = MODE_TERMINAL;
+}
+
+static void osk_save_fm(void) {
+    if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt);
+    mode = MODE_NORMAL;
+}
+
 static void kbd_fn_do(int action) {
-    if (action == 0) { size_t n = strlen(prompt); if (n + 1 < sizeof prompt) { prompt[n] = ' '; prompt[n + 1] = 0; } }
-    else if (action == 1) { if (prompt[0]) prompt[strlen(prompt) - 1] = 0; }
-    else if (action == 2) { if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt); mode = MODE_NORMAL; }
-    else if (action == 3) { keyboard_symbols = !keyboard_symbols; keyboard_col = 0; if (keyboard_row >= kbd_page_rows()) keyboard_row = kbd_page_rows(); }
-    else if (action == 4) { terminal_submit(prompt); prompt[0] = 0; keyboard_symbols = 0; keyboard_shift = 0; keyboard_ctrl = 0; keyboard_alt = 0; keyboard_for_terminal = 0; mode = MODE_TERMINAL; }
-    else if (action == 5) keyboard_shift = !keyboard_shift;
-    else if (action == 6) keyboard_ctrl = !keyboard_ctrl;
-    else if (action == 7) keyboard_alt = !keyboard_alt;
+    if (action == KBD_ACT_SPACE) { size_t n = strlen(prompt); if (n + 1 < sizeof prompt) { prompt[n] = ' '; prompt[n + 1] = 0; } }
+    else if (action == KBD_ACT_DEL) { if (prompt[0]) prompt[strlen(prompt) - 1] = 0; }
+    else if (action == KBD_ACT_SYM) {
+        /* Toggle page; caps and SYM are fixed cells so the cursor stays put. */
+        keyboard_symbols = !keyboard_symbols;
+    }
+    else if (action == KBD_ACT_ENTER) {
+        /* ENTER: submit in terminal sessions, save in FM sessions. Same key,
+         * same look everywhere; only the action differs by context. */
+        if (keyboard_for_terminal) osk_submit_terminal();
+        else osk_save_fm();
+    }
+    else if (action == KBD_ACT_SHIFT) keyboard_shift = !keyboard_shift;
+    else if (action == KBD_ACT_CTRL) keyboard_ctrl = !keyboard_ctrl;
+    else if (action == KBD_ACT_ALT) keyboard_alt = !keyboard_alt;
 }
 
 static void keyboard_input(uint32_t k) {
     int rows = kbd_page_rows();
-    /* Grid navigation: 0..rows-1 keys, `rows` = function row. */
+    /* Grid navigation: rows 0..3 are key rows, `rows` = modifier row. */
     if (pressed(k, BTN_UP)) keyboard_row = keyboard_row <= 0 ? rows : keyboard_row - 1;
     if (pressed(k, BTN_DOWN)) keyboard_row = (keyboard_row + 1) % (rows + 1);
-    if (pressed(k, BTN_LEFT)) keyboard_col = (keyboard_col + 9) % 10;
-    if (pressed(k, BTN_RIGHT)) keyboard_col = (keyboard_col + 1) % 10;
+    if (pressed(k, BTN_LEFT)) keyboard_col = (keyboard_col + KBD_COLS - 1) % KBD_COLS;
+    if (pressed(k, BTN_RIGHT)) keyboard_col = (keyboard_col + 1) % KBD_COLS;
     /* X doubles as SPACE without replacing the on-grid SPACE key. */
     if (pressed(k, BTN_X)) { size_t n = strlen(prompt); if (n + 1 < sizeof prompt) { prompt[n] = ' '; prompt[n + 1] = 0; } }
     if (pressed(k, BTN_A)) {
         if (keyboard_row < rows) {
-            size_t n = strlen(prompt);
-            if (n + 1 < sizeof prompt) { prompt[n] = kbd_char_at(keyboard_row, keyboard_col); prompt[n + 1] = 0; }
-            keyboard_ctrl = keyboard_alt = 0;  /* modifiers are one-shot */
+            int fixed = kbd_fixed_at(keyboard_row, keyboard_col);
+            if (fixed) kbd_fn_do(fixed);
+            else {
+                size_t n = strlen(prompt);
+                char ch = kbd_char_at(keyboard_row, keyboard_col);
+                if (ch && n + 1 < sizeof prompt) { prompt[n] = ch; prompt[n + 1] = 0; }
+                keyboard_ctrl = keyboard_alt = 0;  /* modifiers are one-shot */
+            }
         } else {
             kbd_fn_do(kbd_fn_action_at(keyboard_col));
         }
@@ -559,14 +605,18 @@ static void keyboard_input(uint32_t k) {
     if (pressed(k, BTN_Y) && prompt[0]) prompt[strlen(prompt) - 1] = 0;
     if (keyboard_for_terminal) {
         /* START submits the command (instead of rename/new-folder). */
-        if (pressed(k, BTN_START)) { terminal_submit(prompt); prompt[0] = 0; keyboard_symbols = 0; keyboard_for_terminal = 0; mode = MODE_TERMINAL; }
+        if (pressed(k, BTN_START)) osk_submit_terminal();
         /* B keeps the edited text on the terminal prompt line. */
-        if (pressed(k, BTN_B)) { terminal_set_input(prompt); keyboard_symbols = 0; keyboard_for_terminal = 0; mode = MODE_TERMINAL; }
+        if (pressed(k, BTN_B)) {
+            terminal_set_input(prompt);
+            keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0;
+            keyboard_for_terminal = 0; mode = MODE_TERMINAL;
+        }
         if (pressed(k, BTN_L1)) { terminal_history_move(-1); strncpy(prompt, terminal_input_text(), sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; }
         if (pressed(k, BTN_R1)) { terminal_history_move(1); strncpy(prompt, terminal_input_text(), sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; }
         return;
     }
-    if (pressed(k, BTN_START)) { if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt); mode = MODE_NORMAL; }
+    if (pressed(k, BTN_START)) osk_save_fm();
     if (pressed(k, BTN_B)) mode = MODE_NORMAL;
 }
 
@@ -586,8 +636,8 @@ static int file_is_elf(const char *path) {
 static void dev_run_selected(void) {
     if (selected >= entry_count || entries[selected].dir) { set_status("Nothing runnable"); return; }
     char p[MAX_PATH]; join_path(p, sizeof p, current, entries[selected].name);
-    terminal_set_cwd(current);
     if (process_is_running()) { set_status("A process is already running"); return; }
+    terminal_set_cwd(current);
     int ok = file_is_elf(p) ? process_start_executable(p, NULL, current)
                             : process_start_script(p, current);
     if (!ok) { set_status("Failed to run"); return; }
@@ -671,11 +721,11 @@ static void terminal_input(uint32_t k) {
 static void physical_keyboard_input(void) {
     if (!usbkbd_connected()) return;
     for (;;) {
-        int enter, bs, up, down, left, right, pgup, pgdn, ctrl_c, tab, esc;
+        int enter, bs, up, down, left, right, pgup, pgdn, ctrl_c;
         char ch = usbkbd_poll(&enter, &bs, &up, &down, &left, &right,
-                              &pgup, &pgdn, &ctrl_c, &tab, &esc);
+                              &pgup, &pgdn, &ctrl_c);
         if (!ch && !enter && !bs && !up && !down && !left && !right &&
-            !pgup && !pgdn && !ctrl_c && !tab && !esc) break;
+            !pgup && !pgdn && !ctrl_c) break;
         char *line = NULL;
         if (mode == MODE_TERMINAL) line = NULL;                    /* direct terminal input */
         else if (mode == MODE_KEYBOARD) line = prompt;             /* OSK prompt */
@@ -695,8 +745,8 @@ static void physical_keyboard_input(void) {
         if (ch) { size_t n = strlen(line); if (n + 1 < sizeof prompt) { line[n] = ch; line[n + 1] = 0; } }
         else if (bs) { if (line[0]) line[strlen(line) - 1] = 0; }
         else if (enter) {
-            if (keyboard_for_terminal) { terminal_submit(prompt); prompt[0] = 0; keyboard_symbols = 0; keyboard_shift = 0; keyboard_ctrl = 0; keyboard_alt = 0; keyboard_for_terminal = 0; mode = MODE_TERMINAL; }
-            else { if (prompt_original[0]) do_rename(prompt); else do_new_folder(prompt); mode = MODE_NORMAL; }
+            if (keyboard_for_terminal) osk_submit_terminal();
+            else osk_save_fm();
         } else if (up)   { if (keyboard_for_terminal) { terminal_history_move(-1); strncpy(prompt, terminal_input_text(), sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; } }
         else if (down) { if (keyboard_for_terminal) { terminal_history_move(1); strncpy(prompt, terminal_input_text(), sizeof prompt - 1); prompt[sizeof prompt - 1] = 0; } }
     }
@@ -706,21 +756,21 @@ static void input_loop(void) {
     uint32_t k = keys_now();
     uint32_t quit_chord = (1u << BTN_START) | (1u << BTN_SELECT);
     if ((k & quit_chord) == quit_chord && (previous_keys & quit_chord) != quit_chord) { quit_requested = 1; previous_keys = k; return; }
-    physical_keyboard_input();
     /* Hidden Developer Mode chord: 2s hold TOGGLES it. While the chord is up
      * the individual L1/R1/X/Y handling is suppressed. */
     int dev_evt = devmode_chord_update(k, now_ms());
     if (dev_evt > 0) {
         set_status("Developer Mode Enabled");
         menu_item = 0;
-        if (mode == MODE_TERMINAL && !devmode_is_enabled()) mode = MODE_NORMAL;
     } else if (dev_evt < 0) {
         set_status("Developer Mode Disabled");
         if (mode == MODE_TERMINAL || (mode == MODE_KEYBOARD && keyboard_for_terminal)) mode = MODE_NORMAL;
         keyboard_for_terminal = 0;
+        keyboard_symbols = 0; keyboard_ctrl = 0; keyboard_alt = 0;
         process_shutdown();  /* no orphan if DEV dies while a child runs */
     }
     if (devmode_chord_active()) { previous_keys = k; return; }
+    physical_keyboard_input();
     if (mode == MODE_ACTIONS) actions_input(k); else if (mode == MODE_KEYBOARD) keyboard_input(k); else if (mode == MODE_CONFIRM) { if (pressed(k, BTN_A)) { if (confirm_kind == 1) { do_delete(); mode = MODE_NORMAL; } else do_paste(); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_CONFLICT) { if (pressed(k, BTN_LEFT)) conflict_choice = (conflict_choice + 2) % 3; if (pressed(k, BTN_RIGHT)) conflict_choice = (conflict_choice + 1) % 3; if (pressed(k, BTN_A)) { if (conflict_choice == 1) mode = MODE_REWRITE; else paste_items(conflict_index, conflict_choice == 2 ? 2 : 0); } if (pressed(k, BTN_B)) mode = MODE_NORMAL; } else if (mode == MODE_REWRITE) { if (pressed(k, BTN_A)) paste_items(conflict_index, 1); if (pressed(k, BTN_B)) mode = MODE_CONFLICT; } else if (mode == MODE_INFO) { if (pressed(k, BTN_B) || pressed(k, BTN_A)) mode = MODE_NORMAL; } else if (mode == MODE_TERMINAL) terminal_input(k); else normal_input(k); previous_keys = k;
 }
 
@@ -776,9 +826,13 @@ void retro_run(void) {
     if (input_poll_cb) input_poll_cb();
     input_loop();
     if (status_frames > 0) status_frames--;
+    /* Poll the child regardless of the active view so it is reaped and its
+     * pipe drained even if the user browses the file manager mid-run. */
     if (devmode_is_enabled() && (mode == MODE_TERMINAL || (mode == MODE_KEYBOARD && keyboard_for_terminal))) {
         terminal_update();
         if (terminal_exit_pending()) mode = MODE_NORMAL;
+    } else if (process_is_running()) {
+        process_poll(NULL);   /* reap + drain without rendering terminal lines */
     }
     draw();
     if (quit_requested && environ_cb) environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL);

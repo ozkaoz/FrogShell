@@ -1,6 +1,40 @@
 # README-DEVMODE.md — Baseline del Developer Mode (FrogShell + TreeFrogUI)
 
-**Fecha:** 2026-09-08 (iteración 8 — grid 10 cols + flecha caps + auditoría profunda)
+**Fecha:** 2026-09-08 (iteración 10 — auditoría pre-PR + README público + PR)
+
+## Iteración 10 — Auditoría pre-PR final (2026-09-08)
+
+Auditoría pre-PR completa (regresión DEV-off vs upstream 7894d88, dirty-flag sin huecos, compatibilidad Makefile upstream):
+- Verificado: navegación/menú/clipboard/salida con DEV off = idénticos al upstream. Diferencias declaradas en el PR: OSK rediseñado (mejora estricta: antes no había SPACE/DEL/DONE funcionales y solo mayúsculas), menú 30px, chord suprime L1/R1/X/Y mientras held, teclado físico activo sin DEV, OSK inicia en minúsculas (decisión: mantener + justificar).
+- Dirty-flag: 0 huecos alcanzables (verificado path a path: scroll, conflict, info, prompt, grid, entries, toast, cwd-footer, [exit N]).
+- Fixes cosméticos aplicados: status_text a línea propia, comentario duplicado, null-check video_cb en skip path, exit>128 solo señales <32, memset bits EVIOCGBIT, `string.h` restaurado en usbkbd.c (memset).
+- **README.md actualizado** (requisito PR): sección On-screen keyboard + sección Developer Mode con chord/flags/terminal/OTG.
+- **PR**: rama `developer-mode` desde 7894d88 (base upstream) con commit único EXCLUYENDO README-DEVMODE.md (doc interno); PR → tzubertowski/FrogShell.
+
+Deploy iteración 10: solo `G:\cubegm\cores\frogshell_libretro.so` (SHA256 812C6CB2..., 97.364 B). Compilación 0 warnings.
+
+---
+
+## Iteración 9 — Minúsculas por defecto + optimización dirty-flag (2026-09-08)
+
+**Cambio pedido**: el teclado OSK abre en **minúsculas** en ambos contextos (antes el FM abría en ABC). El comentario de `keyboard_shift` actualizado.
+
+**Auditoría final (rendimiento + bugs) — hallazgos corregidos**:
+1. **BUG CRÍTICO usbkbd_poll**: con cola vacía NO escribía los 9 out-params → el caller re-leía valores stale del stack → **último evento reprocesado en bucle infinito** (solo con teclado OTG conectado). Fix: zeros al inicio de usbkbd_poll.
+2. **PERF ALTO — frame-skip (dirty-flag)**: draw() redibujaba TODO el canvas + conversión RGB565 cada frame aunque nada cambiara (~4-5ms/frame en 480p idle, hasta ~10ms en 720p denso = 25-60% del presupuesto). Ahora `frame_changed()` compara (mode, status, devmode, terminal lines/scroll, selected/menu_item, frame_dirty) y si nada cambió re-presenta el último buffer convertido via video_cb — frames pixel-idénticos, cero cambio visible. Dirty se marca en: edge de input (`k != previous_keys`), teclado físico, `scan()`, output nuevo de proceso, proceso vivo (para el [exit N]).
+3. **Fuga de memoria en reload del core**: `font_buffer` y bitmaps del glyph cache nunca se liberaban en `retro_deinit` (~1-2MB por reload). Fix: `glyph_cache_reset(0/1)` + `free(font_buffer)`.
+4. **ESC/TAB del teclado físico** se insertaban como chars literales (27/9) — filtrados en usbkbd.c (`ch >= 32`).
+5. **SIGINT** ahora también instalado (el comentario lo decía, solo estaba SIGTERM).
+6. `osk_save_fm` resetea symbols/ctrl/alt (consistencia con osk_submit_terminal).
+7. Comentario obsoleto de keyboard_shift corregido.
+
+**Verificados correctos (sin tocar)**: keys_now() (<100 ciclos, fino), process_poll sin proceso (coste 0, guards), usbkbd sin teclado (coste 0), malloc/frame 0 (glyph cache), chord X+Y sin espacio fantasma (orden chord→return→dispatch), rename con shift=0 (texto original intacto), teclado físico en modos ACTIONS/CONFIRM/etc (eventos descartados limpios), echo tras clear (nunca visible), doble gate de spawn (imposible proceso con DEV off).
+
+**PERF conocida, NO aplicada (invasiva para el valor)**: precompute de labels en scan() (~30-60K ciclos/frame), blit de glyphs directo al canvas, poll() único en usbkbd. El dirty-flag ya elimina el coste en idle (donde importaba).
+
+Deploy iteración 9: solo `G:\cubegm\cores\frogshell_libretro.so` (SHA256 C1C139CB...). Compilación 0 warnings. Commit de esta iteración pendiente de prueba física.
+
+---
 
 ## Iteración 8 — Grid 10 columnas + caps flecha + auditoría completa (2026-09-08)
 

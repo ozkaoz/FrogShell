@@ -2,6 +2,7 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
@@ -50,6 +51,7 @@ static void push_event(int flag, char ch) {
 /* Is this evdev node a keyboard? Check the key bitmap for KEY_Q/KEY_SPACE. */
 static int node_is_keyboard(int fd) {
     unsigned char bits[KEY_MAX / 8 + 1];
+    memset(bits, 0, sizeof bits);
     if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof bits), bits) < 0) return 0;
     int q = KEY_Q / 8, s = KEY_SPACE / 8;
     return (bits[q] & (1u << (KEY_Q % 8))) && (bits[s] & (1u << (KEY_SPACE % 8)));
@@ -81,6 +83,10 @@ bool usbkbd_connected(void) { return connected; }
 char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
                  int *left, int *right, int *pgup, int *pgdn,
                  int *ctrl_c) {
+    /* Always clear the flags first: an empty queue must report "no event",
+     * never let the caller re-read stale stack values from last time. */
+    *enter = 0; *backspace = 0; *up = 0; *down = 0;
+    *left = 0; *right = 0; *pgup = 0; *pgdn = 0; *ctrl_c = 0;
     struct input_event ev;
     for (int i = 0; i < fd_count; i++) {
         while (read(fds[i], &ev, sizeof ev) == (ssize_t)sizeof ev) {
@@ -104,7 +110,7 @@ char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
             if (mod_ctrl || mod_alt) continue;          /* other combos: skip */
             if (code >= 128) continue;
             char ch = mod_shift ? map_shift[code] : map_plain[code];
-            if (ch) push_event(0, ch);
+            if (ch && ch >= 32) push_event(0, ch);   /* drop ESC/TAB and other control codes */
         }
     }
     if (pending_tail == pending_head) return 0;         /* nothing pending */

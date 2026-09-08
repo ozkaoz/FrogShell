@@ -79,9 +79,9 @@ void terminal_output(const char *buf, int len) {
 
 static void report_exit(int code, int sig) {
     char line[80];
-    if (sig > 0)            snprintf(line, sizeof line, "[terminated SIG%d]", sig);
-    else if (code == 0)     snprintf(line, sizeof line, "[exit 0]");
-    else                    snprintf(line, sizeof line, "[exit %d]", code);
+    if (sig > 0 && sig < 32)     snprintf(line, sizeof line, "[terminated SIG%d]", sig);
+    else if (code == 0)          snprintf(line, sizeof line, "[exit 0]");
+    else                         snprintf(line, sizeof line, "[exit %d]", code);
     line_push(line);
 }
 

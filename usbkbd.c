@@ -2,11 +2,9 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include <unistd.h>
 #include <linux/input.h>
 #include <sys/ioctl.h>
-#include <sys/stat.h>
 
 #include "usbkbd.h"
 
@@ -82,7 +80,7 @@ bool usbkbd_connected(void) { return connected; }
 
 char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
                  int *left, int *right, int *pgup, int *pgdn,
-                 int *ctrl_c, int *tab, int *esc) {
+                 int *ctrl_c) {
     struct input_event ev;
     for (int i = 0; i < fd_count; i++) {
         while (read(fds[i], &ev, sizeof ev) == (ssize_t)sizeof ev) {
@@ -102,8 +100,6 @@ char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
             if (code == KEY_RIGHT)      { push_event(6, 0);  continue; }
             if (code == KEY_PAGEUP)     { push_event(7, 0);  continue; }
             if (code == KEY_PAGEDOWN)   { push_event(8, 0);  continue; }
-            if (code == KEY_TAB)        { push_event(10, 0); continue; }
-            if (code == KEY_ESC)        { push_event(11, 0); continue; }
             if (code == KEY_C && mod_ctrl) { push_event(9, 0); continue; }
             if (mod_ctrl || mod_alt) continue;          /* other combos: skip */
             if (code >= 128) continue;
@@ -117,6 +113,6 @@ char usbkbd_poll(int *enter, int *backspace, int *up, int *down,
     pending_tail = (pending_tail + 1) % USBKBD_KEYBUF;
     *enter = flag == 1; *backspace = flag == 2; *up = flag == 3; *down = flag == 4;
     *left = flag == 5; *right = flag == 6; *pgup = flag == 7; *pgdn = flag == 8;
-    *ctrl_c = flag == 9; *tab = flag == 10; *esc = flag == 11;
+    *ctrl_c = flag == 9;
     return flag == 0 ? ch : 0;
 }

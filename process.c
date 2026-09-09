@@ -12,6 +12,7 @@
 #include "process.h"
 
 static pid_t child_pid = -1;
+static pid_t child_pgid = -1;  /* the process group: survives the leader's reap */
 static int   out_pipe[2] = { -1, -1 };  /* parent reads child stdout+stderr */
 static int   in_pipe[2]  = { -1, -1 };  /* parent writes child stdin (unused now, kept open) */
 static int   child_status = 0;
@@ -70,6 +71,7 @@ static pid_t spawn_child(char *const argv[], const char *cwd) {
     int fl = fcntl(out_pipe[0], F_GETFL, 0);
     if (fl >= 0) fcntl(out_pipe[0], F_SETFL, fl | O_NONBLOCK);
     child_pid = pid;
+    child_pgid = pid;   /* the group id equals the leader's pid (setpgid(0,0)) */
     child_status = 0;
     child_done = false;
     last_exit = -1;
@@ -120,17 +122,21 @@ void process_poll(process_output_cb on_output) {
             child_done = true;
             child_pid = -1;
             last_exit = decode_status(child_status);  /* report even if a grandchild still holds the pipe */
+            /* child_pgid is kept: descendants may still hold the group alive */
         }
     }
     if (out_pipe[0] >= 0) {
         char buf[2048];
-        for (;;) {
+        /* Cap the amount drained per frame: a continuously-writing command
+         * (e.g. `yes`) can refill the pipe before every next read, so an
+         * unbounded loop would never reach EAGAIN and monopolize retro_run().
+         * The remainder is resumed on the next poll. */
+        for (int chunks = 0; chunks < 4; chunks++) {
             ssize_t n = read(out_pipe[0], buf, sizeof buf);
             if (n > 0) { if (on_output) on_output(buf, (int)n); continue; }
             if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
                 /* EOF / error: nothing more will arrive from this pipe. */
                 close_fd(&out_pipe[0]);
-                break;
             }
             break;  /* EAGAIN: no data yet */
         }
@@ -138,7 +144,9 @@ void process_poll(process_output_cb on_output) {
 }
 
 static void kill_group(int sig) {
-    if (child_pid > 0) kill(-child_pid, sig);
+    /* Signal the retained group id: works even after the leader was reaped
+     * (a `sleep 999 &` descendant still lives in the old group). */
+    if (child_pgid > 0) kill(-child_pgid, sig);
 }
 
 void process_interrupt(void) {
@@ -146,23 +154,28 @@ void process_interrupt(void) {
 }
 
 void process_shutdown(void) {
-    if (child_pid > 0) {
+    if (child_pgid > 0) {
         kill_group(SIGTERM);
         int waited = 0;
-        while (!child_done && waited < 100) { /* ~200ms grace at 2ms steps */
+        while (!child_done && child_pid > 0 && waited < 100) { /* ~200ms grace at 2ms steps */
             int status;
             if (waitpid(child_pid, &status, WNOHANG) == child_pid) { child_status = status; child_done = true; break; }
             usleep(2000);
             waited++;
         }
-        if (!child_done) { kill_group(SIGKILL); usleep(10000); }
-        if (!child_done) {
+        if (!child_done && child_pid > 0) { kill_group(SIGKILL); usleep(10000); }
+        if (!child_done && child_pid > 0) {
             int status;
             if (waitpid(child_pid, &status, WNOHANG) == child_pid) child_status = status;
             child_done = true;  /* give up reaping: SIGKILL cannot be ignored */
         }
+        /* After the grace window the whole group has been TERMed + KILLed;
+         * any survivor would be immune to further signals too. */
+        kill_group(SIGKILL);
+        child_pgid = -1;
     }
     child_pid = -1;
+    child_done = true;
     close_fd(&out_pipe[0]);
     close_fd(&out_pipe[1]);
     close_fd(&in_pipe[0]);
